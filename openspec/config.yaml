@@ -1,0 +1,91 @@
+schema: spec-driven
+
+context: |
+  Project: Product Sourcing MVP.
+  Primary source of truth: Main.md.
+  Acceptance and verification source of truth: test_protocol.md.
+
+  Goal:
+  Build an MVP service where a user creates product search requests in WebUI,
+  an AI agent researches suppliers through a browser MCP connector, normalized
+  product cards are stored in PostgreSQL, and the user can ask the agent to
+  contact suppliers through supported email or Telegram channels.
+
+  MVP scope:
+  - WebUI for search requests, request status, product catalog, product details,
+    supplier contacts, contact attempts, and a contact supplier action.
+  - Backend API for search requests, products, agent task creation, statuses,
+    and supplier-contact results.
+  - PostgreSQL persistence for search_requests, products, supplier_contacts,
+    contact_attempts, and agent_tasks.
+  - Agent worker for product_search and supplier_contact tasks.
+  - Connectors: browser MCP, email, Telegram.
+  - Production-like E2E readiness for every scenario in test_protocol.md.
+
+  Non-goals:
+  - No autonomous purchasing or order confirmation.
+  - No payments, ERP/1C integration, exports, advanced CRM, supplier scoring,
+    advanced duplicate resolution, long-running negotiation automation, mass
+    messaging, or multi-tenant/advanced permission model in the MVP.
+
+  Architecture:
+  - WebUI communicates only with Backend API.
+  - Backend API owns validation, persistence, and task creation.
+  - Agent Worker processes asynchronous tasks and must not block HTTP responses.
+  - Database is the source of truth for statuses and results.
+  - Agent output is untrusted until validated against strict schemas.
+  - E2E testing must use real PostgreSQL, a real broker, real worker processes,
+    real connector implementations, and a controlled supplier test contour.
+
+  Recommended stack:
+  - Backend: Python 3.12+, FastAPI, SQLAlchemy 2.x, Alembic, Pydantic v2,
+    PostgreSQL, Redis, Celery/RQ/Arq or an equivalent background job broker.
+  - WebUI: React + TypeScript, Vite or Next.js, TanStack Query, React Router or
+    Next.js routing, shadcn/ui, Ant Design, or Mantine.
+  - Worker: Python process, ModelProvider abstraction, ToolRegistry abstraction,
+    MCP client layer, Pydantic structured-output validation, retry policy, and
+    tool execution audit logs.
+
+  Domain entities:
+  - SearchRequest: queued, running, completed, failed, cancelled.
+  - ProductCard: normalized product data linked to a search request.
+  - SupplierContact: email or telegram contact linked to a product.
+  - ContactAttempt: queued, running, sent, failed, responded/reserved.
+  - AgentTask: product_search or supplier_contact lifecycle record.
+
+  OpenSpec workflow:
+  - Use Codex OpenSpec skills from .codex/skills for propose, explore, apply,
+    verify, sync, and archive work.
+  - On Windows, prefer openspec.cmd because openspec.ps1 may be blocked by
+    PowerShell execution policy.
+  - First MVP change id: add-product-sourcing-mvp.
+  - Keep active work in openspec/changes/<change-id>/ until implementation is
+    complete, then archive into openspec/specs/.
+
+rules:
+  proposal:
+    - Keep proposals aligned with Main.md and test_protocol.md.
+    - List every new capability that needs a delta spec.
+    - Include explicit MVP non-goals when they affect scope or implementation decisions.
+    - State how the change will be verified before implementation starts.
+  specs:
+    - Use ADDED Requirements for new MVP capabilities.
+    - Write scenarios with GIVEN, WHEN, THEN, and AND clauses where helpful.
+    - Keep requirements testable and independent from implementation details.
+    - Requirements that affect acceptance must map to one or more TC-E2E cases
+      from test_protocol.md.
+    - Include negative requirements for prohibited MVP behavior when the test
+      protocol checks their absence.
+  design:
+    - Preserve the async worker boundary: HTTP requests create durable tasks and return quickly.
+    - Treat all LLM and connector output as untrusted until validated.
+    - Keep model and connector choices behind abstractions.
+    - Explain how unit, integration, smoke, and production-like E2E tests relate
+      to the implementation.
+    - Distinguish allowed unit-test mocks from prohibited E2E mocks.
+  tasks:
+    - Use test driven development: add or update failing tests before production implementation.
+    - Break tasks into implementation-sized checkboxes grouped by subsystem.
+    - For each subsystem, include tests, implementation, and refactor/cleanup steps.
+    - Include verification, observability, documentation, and MVP demo flow work.
+    - Include a final OpenSpec validation step and a test_protocol.md coverage check.

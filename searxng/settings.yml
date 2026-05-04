@@ -1,0 +1,19 @@
+use_default_settings: true
+
+general:
+  instance_name: "product-sourcing-searxng"
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+server:
+  secret_key: "product-sourcing-local-dev-change-me"
+  limiter: false
+  image_proxy: false
+
+ui:
+  static_use_hash: true

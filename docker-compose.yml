@@ -1,0 +1,168 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: product_sourcing
+      POSTGRES_USER: product_sourcing
+      POSTGRES_PASSWORD: change-me
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U product_sourcing -d product_sourcing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@postgres:5432/product_sourcing
+      REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://localhost:8000/api
+      WEBUI_BASE_URL: http://localhost:5173
+      BROWSER_PROVIDER: playwright_mcp
+      BROWSER_MCP_SERVICE_NAME: browser-mcp
+      BROWSER_MCP_URL: http://browser-mcp:8931/mcp
+      BROWSER_ALLOWED_DOMAINS: ${DOCKER_BROWSER_ALLOWED_DOMAINS:-supplier-site,localhost,127.0.0.1}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      WEB_SEARCH_PROVIDER: multi
+      WEB_SEARCH_ENGINES: duckduckgo:https://duckduckgo.com/html/,searxng:http://searxng:8080/search
+      WEB_SEARCH_URL: http://searxng:8080/search
+      EMAIL_CONNECTOR_PROVIDER: smtp
+      EMAIL_SMTP_HOST: ${DOCKER_EMAIL_SMTP_HOST:-${EMAIL_SMTP_HOST:-mailpit}}
+      EMAIL_SMTP_PORT: ${DOCKER_EMAIL_SMTP_PORT:-${EMAIL_SMTP_PORT:-1025}}
+      EMAIL_SMTP_USER: ${DOCKER_EMAIL_SMTP_USER:-${EMAIL_SMTP_USER:-}}
+      EMAIL_SMTP_PASSWORD: ${DOCKER_EMAIL_SMTP_PASSWORD:-${EMAIL_SMTP_PASSWORD:-}}
+      EMAIL_FROM: ${DOCKER_EMAIL_FROM:-${EMAIL_FROM:-product-sourcing-agent@example.test}}
+      EMAIL_USE_TLS: ${DOCKER_EMAIL_USE_TLS:-${EMAIL_USE_TLS:-false}}
+      EMAIL_USE_SSL: ${DOCKER_EMAIL_USE_SSL:-${EMAIL_USE_SSL:-false}}
+      TEST_SUPPLIER_SITE_URL: ${DOCKER_TEST_SUPPLIER_SITE_URL:-http://supplier-site}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browser-mcp:
+        condition: service_started
+      searxng:
+        condition: service_started
+      ollama:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@postgres:5432/product_sourcing
+      REDIS_URL: redis://redis:6379/0
+      BROWSER_PROVIDER: playwright_mcp
+      BROWSER_MCP_SERVICE_NAME: browser-mcp
+      BROWSER_MCP_URL: http://browser-mcp:8931/mcp
+      BROWSER_ALLOWED_DOMAINS: ${DOCKER_BROWSER_ALLOWED_DOMAINS:-supplier-site,localhost,127.0.0.1}
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      WEB_SEARCH_PROVIDER: multi
+      WEB_SEARCH_ENGINES: duckduckgo:https://duckduckgo.com/html/,searxng:http://searxng:8080/search
+      WEB_SEARCH_URL: http://searxng:8080/search
+      EMAIL_CONNECTOR_PROVIDER: smtp
+      EMAIL_SMTP_HOST: ${DOCKER_EMAIL_SMTP_HOST:-${EMAIL_SMTP_HOST:-mailpit}}
+      EMAIL_SMTP_PORT: ${DOCKER_EMAIL_SMTP_PORT:-${EMAIL_SMTP_PORT:-1025}}
+      EMAIL_SMTP_USER: ${DOCKER_EMAIL_SMTP_USER:-${EMAIL_SMTP_USER:-}}
+      EMAIL_SMTP_PASSWORD: ${DOCKER_EMAIL_SMTP_PASSWORD:-${EMAIL_SMTP_PASSWORD:-}}
+      EMAIL_FROM: ${DOCKER_EMAIL_FROM:-${EMAIL_FROM:-product-sourcing-agent@example.test}}
+      EMAIL_USE_TLS: ${DOCKER_EMAIL_USE_TLS:-${EMAIL_USE_TLS:-false}}
+      EMAIL_USE_SSL: ${DOCKER_EMAIL_USE_SSL:-${EMAIL_USE_SSL:-false}}
+      TEST_SUPPLIER_SITE_URL: ${DOCKER_TEST_SUPPLIER_SITE_URL:-http://supplier-site}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      browser-mcp:
+        condition: service_started
+      searxng:
+        condition: service_started
+      ollama:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  webui:
+    build:
+      context: ./frontend
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+  supplier-site:
+    image: nginx:1.27-alpine
+    ports:
+      - "8088:80"
+    volumes:
+      - ./e2e/supplier-site:/usr/share/nginx/html:ro
+
+  browser-mcp:
+    image: mcr.microsoft.com/playwright:latest
+    command:
+      - sh
+      - -lc
+      - CHROME_PATH=$$(find /ms-playwright -path '*/chrome-linux/chrome' | head -n 1);
+        npx @playwright/mcp@latest --headless --isolated --no-sandbox
+        --executable-path "$$CHROME_PATH" --host 0.0.0.0 --port 8931
+        --allowed-hosts '*'
+    ports:
+      - "8931:8931"
+    depends_on:
+      - supplier-site
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    environment:
+      BASE_URL: http://localhost:8888/
+      INSTANCE_NAME: product-sourcing-searxng
+    volumes:
+      - ./searxng:/etc/searxng:ro
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./.ollama/docker:/root/.ollama
+
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  postgres_data:

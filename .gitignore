@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+*.tsbuildinfo
+.pytest_cache/
+.tools/
+.ollama/
+.logs/
+.npm-cache/
+.ms-playwright/
+.tmp/
+.playwright-mcp/
