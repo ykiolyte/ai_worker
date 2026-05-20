@@ -41,9 +41,23 @@ class MaxResultsAwareBrowserConnector(BrowserConnector):
         return self.result
 
 
-def runtime_with_browser(browser):
+class MadeInChinaConnector:
+    def __init__(self, result):
+        self.result = result
+        self.queries = []
+        self.max_results = []
+
+    def research(self, query_text: str, max_results=None):
+        self.queries.append(query_text)
+        self.max_results.append(max_results)
+        return self.result
+
+
+def runtime_with_browser(browser, made_in_china=None):
     registry = ToolRegistry()
     registry.register("browser_mcp", browser)
+    if made_in_china is not None:
+        registry.register("made_in_china", made_in_china)
     return AgentRuntime(model_provider=FakeModelProvider(), tool_registry=registry)
 
 
@@ -283,6 +297,75 @@ class ProductSearchWorkerContractTest(unittest.TestCase):
 
         self.assertEqual([request.query_text], browser.queries)
         self.assertEqual([8], browser.max_results)
+
+    def test_product_search_merges_made_in_china_candidates_when_enabled(self):
+        request, task = self.create_search_task("industrial cnc controller", max_results=5)
+        browser = BrowserConnector(ConnectorResult(success=True, payload={"products": []}))
+        made_in_china = MadeInChinaConnector(
+            ConnectorResult(
+                success=True,
+                payload={
+                    "products": [
+                        {
+                            "title": "Industrial CNC Controller IC-200",
+                            "productUrl": "https://cnc.en.made-in-china.com/product/ic200.html",
+                            "price": "840.00",
+                            "currency": "USD",
+                            "supplierName": "Shenzhen CNC Factory",
+                            "contacts": [],
+                            "attributes": {"sourcePlatform": "made-in-china", "moq": "10 Pieces"},
+                        }
+                    ],
+                    "source": {"provider": "made_in_china"},
+                },
+            )
+        )
+
+        process_product_search(
+            self.repo,
+            runtime_with_browser(browser, made_in_china),
+            task.id,
+            allow_products_without_contacts=True,
+        )
+
+        self.assertEqual([request.query_text], made_in_china.queries)
+        self.assertEqual([5], made_in_china.max_results)
+        products = [
+            product for product in self.repo.list_products_for_request(request.id)
+            if product.attributes.get("demo") != "true"
+        ]
+        self.assertEqual(1, len(products))
+        self.assertEqual("Industrial CNC Controller IC-200", products[0].title)
+        self.assertEqual("made-in-china", products[0].attributes["sourcePlatform"])
+        self.assertEqual(1, task.output_payload["productsCreated"])
+
+    def test_product_search_keeps_working_when_made_in_china_fails(self):
+        request, task = self.create_search_task("rack workstation", max_results=5)
+        browser = BrowserConnector(
+            ConnectorResult(
+                success=True,
+                payload={
+                    "products": [
+                        {
+                            "title": "Rack Workstation RW-500",
+                            "productUrl": "https://supplier.test/products/rw-500",
+                            "contacts": [{"type": "email", "value": "sales@supplier.test"}],
+                        }
+                    ]
+                },
+            )
+        )
+        made_in_china = MadeInChinaConnector(ConnectorResult(success=False, error_message="Made-in-China captcha detected"))
+
+        process_product_search(self.repo, runtime_with_browser(browser, made_in_china), task.id)
+
+        self.assertEqual(SearchRequestStatus.COMPLETED, request.status)
+        self.assertEqual(AgentTaskStatus.COMPLETED, task.status)
+        self.assertEqual(1, task.output_payload["productsCreated"])
+        self.assertEqual(
+            {"source": "made_in_china", "error": "Made-in-China captcha detected"},
+            task.output_payload["connectorErrors"][0],
+        )
 
 
 if __name__ == "__main__":

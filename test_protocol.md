@@ -2315,3 +2315,19 @@ Expected:
 * queued, running, and failed drafts do not expose an enabled download button;
 * the downloaded file contains a visible draft marker;
 * the downloaded file does not contain order confirmation, purchase confirmation, signatures, payment instructions, payment data, or legally binding commitment language.
+
+---
+
+# 25. Made-in-China Discovery Extension
+
+Made-in-China discovery is an optional supplier research source. It does not replace the controlled supplier test site required for MVP acceptance, because public Made-in-China pages may return captcha/protection pages or change markup outside the test contour.
+
+Focused automated coverage must verify:
+
+* Made-in-China search-result HTML parsing against controlled fixtures;
+* captcha/protection detection without bypass attempts;
+* worker fallback behavior when Made-in-China discovery fails;
+* no persistence of invalid partial products;
+* no purchasing, checkout, payment, order confirmation, or protected detail-page scraping.
+
+Production-like E2E acceptance remains based on the real WebUI, Backend API, PostgreSQL, broker, Agent Worker, ModelProvider, browser MCP connector, email connector, Telegram connector, and controlled supplier test contacts owned by the project.

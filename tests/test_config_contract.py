@@ -23,3 +23,21 @@ class SettingsEnvFileContractTest(unittest.TestCase):
         self.assertTrue(settings.auto_process_search_tasks)
         self.assertTrue(settings.auto_process_supplier_contact_tasks)
         self.assertEqual(1, settings.search_contact_enrichment_pages)
+
+    def test_settings_loads_made_in_china_connector_options(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MADE_IN_CHINA_DISCOVERY_ENABLED": "true",
+                "MADE_IN_CHINA_BASE_URL": "https://example.test/products-search/hot-china-products",
+                "MADE_IN_CHINA_TIMEOUT_SECONDS": "9",
+                "MADE_IN_CHINA_MAX_RESULTS": "4",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertTrue(settings.made_in_china_discovery_enabled)
+        self.assertEqual("https://example.test/products-search/hot-china-products", settings.made_in_china_base_url)
+        self.assertEqual(9, settings.made_in_china_timeout_seconds)
+        self.assertEqual(4, settings.made_in_china_max_results)

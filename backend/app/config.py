@@ -84,6 +84,10 @@ class Settings:
     allow_products_without_contacts: bool = False
     search_contact_enrichment_pages: int = 1
     contracts_database_url: str = ""
+    made_in_china_discovery_enabled: bool = False
+    made_in_china_base_url: str = "https://www.made-in-china.com/products-search/hot-china-products"
+    made_in_china_timeout_seconds: int = 15
+    made_in_china_max_results: int = 5
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -154,6 +158,13 @@ class Settings:
             auto_sync_gmail_inbound=_env_bool("AUTO_SYNC_GMAIL_INBOUND", True),
             gmail_inbound_sync_interval_seconds=float(os.getenv("GMAIL_INBOUND_SYNC_INTERVAL_SECONDS", "30")),
             allow_products_without_contacts=_env_bool("ALLOW_PRODUCTS_WITHOUT_CONTACTS", False),
+            made_in_china_discovery_enabled=_env_bool("MADE_IN_CHINA_DISCOVERY_ENABLED", False),
+            made_in_china_base_url=os.getenv(
+                "MADE_IN_CHINA_BASE_URL",
+                "https://www.made-in-china.com/products-search/hot-china-products",
+            ),
+            made_in_china_timeout_seconds=int(os.getenv("MADE_IN_CHINA_TIMEOUT_SECONDS", "15")),
+            made_in_china_max_results=int(os.getenv("MADE_IN_CHINA_MAX_RESULTS", "5")),
         )
 
 

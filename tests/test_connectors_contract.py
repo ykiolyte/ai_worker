@@ -11,6 +11,7 @@ from backend.app.connectors import (
     EXTRACT_PRODUCT_CODE,
     GmailImapInboundConnector,
     InboundEmailMessage,
+    MadeInChinaSearchConnector,
     McpProtocolError,
     McpHttpClient,
     MultiEngineWebSearchConnector,
@@ -323,6 +324,72 @@ def make_settings(**overrides):
 
 
 class ConnectorContractTest(unittest.TestCase):
+    def test_made_in_china_connector_extracts_search_results(self):
+        calls = []
+
+        def http_get(url, timeout):
+            calls.append((url, timeout))
+            return 200, """
+            <html><body>
+              <div class="product">
+                <h2 class="product-name">
+                  <a title="Industrial CNC Controller IC-200" href="//cnc.en.made-in-china.com/product/ic200.html">Industrial CNC Controller IC-200</a>
+                </h2>
+                <div class="price-new"><strong class="price">US$ <span>120</span>-<span>150</span></strong></div>
+                <div class="moq-new"><span class="attribute">10 Pieces</span></div>
+                <a class="compnay-name" title="Shenzhen CNC Factory" href="//cnc.en.made-in-china.com">Shenzhen CNC Factory</a>
+                <div class="address-info">Guangdong, China</div>
+                <div class="business-type-info">Manufacturer/Factory</div>
+                <img data-original="//image.made-in-china.com/ic200.jpg" />
+              </div>
+              <div class="product">
+                <h2 class="product-name">
+                  <a title="Rack Workstation RW-500" href="https://rack.en.made-in-china.com/product/rw500.html">Rack Workstation RW-500</a>
+                </h2>
+                <div class="price-new"><strong class="price">US$ 840</strong></div>
+                <div class="moq-new">1 Piece (MOQ)</div>
+                <a class="compnay-name" title="Rack Supplier" href="https://rack.en.made-in-china.com">Rack Supplier</a>
+              </div>
+            </body></html>
+            """
+
+        connector = MadeInChinaSearchConnector(http_get=http_get, max_results=1, timeout_seconds=7)
+
+        result = connector.research("industrial cnc controller", max_results=5)
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertIn("industrial_cnc_controller", calls[0][0])
+        self.assertEqual(7, calls[0][1])
+        self.assertEqual(1, len(result.payload["products"]))
+        product = result.payload["products"][0]
+        self.assertEqual("Industrial CNC Controller IC-200", product["title"])
+        self.assertEqual("https://cnc.en.made-in-china.com/product/ic200.html", product["productUrl"])
+        self.assertEqual("Shenzhen CNC Factory", product["supplierName"])
+        self.assertEqual("USD", product["currency"])
+        self.assertEqual([], product["contacts"])
+        self.assertEqual(["https://image.made-in-china.com/ic200.jpg"], product["images"])
+        self.assertEqual("US$ 120-150", product["attributes"]["madeInChinaPriceText"])
+        self.assertEqual("10 Pieces", product["attributes"]["moq"])
+        self.assertEqual("Guangdong, China", product["attributes"]["supplierLocation"])
+        self.assertEqual("Manufacturer/Factory", product["attributes"]["businessType"])
+        self.assertEqual("made-in-china", product["attributes"]["sourcePlatform"])
+
+    def test_made_in_china_connector_detects_captcha(self):
+        connector = MadeInChinaSearchConnector(http_get=lambda _url, _timeout: (200, "fcaptcha captcha.vemic.com"))
+
+        result = connector.research("bluetooth speaker")
+
+        self.assertFalse(result.success)
+        self.assertIn("captcha", result.error_message.lower())
+
+    def test_made_in_china_connector_reports_http_failure(self):
+        connector = MadeInChinaSearchConnector(http_get=lambda _url, _timeout: (503, "unavailable"))
+
+        result = connector.research("bluetooth speaker")
+
+        self.assertFalse(result.success)
+        self.assertIn("HTTP 503", result.error_message)
+
     def test_mcp_http_client_uses_json_rpc_tool_call(self):
         posts = []
 
@@ -1486,6 +1553,13 @@ class ConnectorContractTest(unittest.TestCase):
         self.assertIsNotNone(registry.require("browser_mcp"))
         self.assertIsNotNone(registry.require("email"))
         self.assertIsNotNone(registry.require("telegram"))
+
+    def test_tool_registry_factory_registers_made_in_china_when_enabled(self):
+        settings = make_settings(made_in_china_discovery_enabled=True)
+
+        registry = build_tool_registry(settings)
+
+        self.assertIsInstance(registry.require("made_in_china"), MadeInChinaSearchConnector)
 
 
 if __name__ == "__main__":

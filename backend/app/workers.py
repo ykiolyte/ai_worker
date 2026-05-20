@@ -55,17 +55,49 @@ def process_product_search(
         task.transition_to(AgentTaskStatus.RUNNING)
         request.transition_to(SearchRequestStatus.RUNNING)
 
-        browser = runtime.tool_registry.require("browser_mcp")
         max_results = _task_max_results(task.input_payload)
+        payload_products: list[dict] = []
+        connector_errors: list[dict[str, str]] = []
+        browser_succeeded = False
+
+        browser = runtime.tool_registry.require("browser_mcp")
         try:
-            connector_result = browser.research(request.query_text, max_results=max_results)
-        except TypeError:
-            connector_result = browser.research(request.query_text)
-        if not connector_result.success:
-            raise RuntimeError(connector_result.error_message or "browser research failed")
+            try:
+                connector_result = browser.research(request.query_text, max_results=max_results)
+            except TypeError:
+                connector_result = browser.research(request.query_text)
+            if connector_result.success:
+                browser_succeeded = True
+                payload_products.extend((connector_result.payload or {}).get("products") or [])
+            else:
+                connector_errors.append(
+                    {"source": "browser_mcp", "error": connector_result.error_message or "browser research failed"}
+                )
+        except Exception as exc:
+            connector_errors.append({"source": "browser_mcp", "error": str(exc)})
+
+        made_in_china = runtime.tool_registry.tools.get("made_in_china")
+        if made_in_china is not None:
+            try:
+                try:
+                    made_result = made_in_china.research(request.query_text, max_results=max_results)
+                except TypeError:
+                    made_result = made_in_china.research(request.query_text)
+                if made_result.success:
+                    payload_products.extend((made_result.payload or {}).get("products") or [])
+                else:
+                    connector_errors.append(
+                        {"source": "made_in_china", "error": made_result.error_message or "Made-in-China discovery failed"}
+                    )
+            except Exception as exc:
+                connector_errors.append({"source": "made_in_china", "error": str(exc)})
+
+        if not browser_succeeded and not payload_products:
+            error = "; ".join(item["error"] for item in connector_errors) or "browser research failed"
+            raise RuntimeError(error)
 
         output = validate_agent_product_output(
-            connector_result.payload or {},
+            {"products": payload_products},
             allow_products_without_contacts=allow_products_without_contacts,
         )
         existing_products = repo.list_products_for_request(request.id)
@@ -123,6 +155,8 @@ def process_product_search(
             "productsSkipped": len(skipped),
             "errors": skipped,
         }
+        if connector_errors:
+            task.output_payload["connectorErrors"] = connector_errors
         task.transition_to(AgentTaskStatus.COMPLETED)
         request.transition_to(SearchRequestStatus.COMPLETED)
     except Exception as exc:

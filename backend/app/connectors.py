@@ -17,7 +17,7 @@ import smtplib
 import ssl
 import subprocess
 from typing import Any, Callable, Protocol
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from .agent import ConnectorResult, ModelProvider, ToolRegistry
@@ -546,6 +546,244 @@ class DuckDuckGoHtmlWebSearchConnector:
         )
         with urlopen(request, timeout=timeout_seconds) as response:
             return response.status, response.read().decode("utf-8", errors="replace")
+
+
+@dataclass
+class MadeInChinaSearchConnector:
+    base_url: str = "https://www.made-in-china.com/products-search/hot-china-products"
+    max_results: int = 5
+    timeout_seconds: int = 15
+    http_get: Callable[[str, int], tuple[int, str]] | None = None
+
+    def research(self, query_text: str, max_results: int | None = None) -> ConnectorResult:
+        endpoint = self._search_endpoint(query_text)
+        try:
+            status, body = (self.http_get or self._urllib_get)(endpoint, self.timeout_seconds)
+            if status >= 400:
+                return ConnectorResult(success=False, error_message=f"Made-in-China returned HTTP {status}")
+            if _made_in_china_has_captcha(body):
+                return ConnectorResult(success=False, error_message="Made-in-China captcha or protection page detected")
+            products = self._parse_products(body, query_text, max_results)
+            return ConnectorResult(
+                success=True,
+                payload={
+                    "products": products,
+                    "source": {
+                        "provider": "made_in_china",
+                        "startUrl": endpoint,
+                        "resultsCollected": len(products),
+                    },
+                },
+            )
+        except Exception as exc:
+            return ConnectorResult(success=False, error_message=f"Made-in-China discovery failed: {exc}")
+
+    def _search_endpoint(self, query_text: str) -> str:
+        query = _base_search_query(query_text) or query_text
+        slug = re.sub(r"\s+", "_", query.strip())
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", slug).strip("_") or "products"
+        return f"{self.base_url.rstrip('/')}/{quote(slug)}.html"
+
+    def _parse_products(self, body: str, query_text: str, max_results: int | None) -> list[dict[str, Any]]:
+        limit = _made_in_china_result_limit(self.max_results, max_results)
+        parser = _MadeInChinaSearchResultParser(self.base_url)
+        parser.feed(body or "")
+        products = []
+        for item in parser.products:
+            product = _made_in_china_product_payload(item, query_text)
+            if product:
+                products.append(product)
+            if len(products) >= limit:
+                break
+        return products
+
+    @staticmethod
+    def _urllib_get(endpoint_url: str, timeout_seconds: int) -> tuple[int, str]:
+        request = Request(
+            endpoint_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "User-Agent": "Mozilla/5.0 product-sourcing-mvp/0.1",
+            },
+        )
+        with urlopen(request, timeout=timeout_seconds) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+
+
+class _MadeInChinaSearchResultParser(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.products: list[dict[str, Any]] = []
+        self._in_product_title = False
+        self._title_link: dict[str, Any] | None = None
+        self._current: dict[str, Any] | None = None
+        self._capture_field: str | None = None
+        self._capture_depth = 0
+        self._capture_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {key.lower(): value or "" for key, value in attrs}
+        classes = set(attributes.get("class", "").split())
+        if self._capture_field is not None:
+            self._capture_depth += 1
+        if tag == "h2" and "product-name" in classes:
+            self._in_product_title = True
+            return
+        if self._in_product_title and tag == "a" and attributes.get("href"):
+            self._title_link = {
+                "title": attributes.get("title", ""),
+                "href": attributes["href"],
+                "text": [],
+            }
+            return
+        if self._current is None:
+            return
+        if tag == "img":
+            image = attributes.get("data-original") or attributes.get("src")
+            if image and not self._current.get("imageUrl"):
+                self._current["imageUrl"] = _made_in_china_abs_url(image, self.base_url)
+        if tag == "a" and ("compnay-name" in classes or "company-name" in classes):
+            self._current["supplierUrl"] = _made_in_china_abs_url(attributes.get("href", ""), self.base_url)
+            if attributes.get("title"):
+                self._current["supplierName"] = attributes["title"]
+            self._start_capture("supplierName")
+            return
+        field = _made_in_china_field_for_classes(classes)
+        if field:
+            self._start_capture(field)
+
+    def handle_data(self, data: str) -> None:
+        if self._title_link is not None:
+            self._title_link["text"].append(data)
+        if self._capture_field is not None:
+            self._capture_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._title_link is not None and tag == "a":
+            title = _compact_text(self._title_link.get("title") or " ".join(self._title_link["text"]))
+            href = str(self._title_link.get("href") or "")
+            if title and href:
+                self._current = {
+                    "title": title,
+                    "productUrl": _made_in_china_abs_url(href, self.base_url),
+                    "position": len(self.products) + 1,
+                }
+                self.products.append(self._current)
+            self._title_link = None
+        if tag == "h2":
+            self._in_product_title = False
+        if self._capture_field is not None:
+            self._capture_depth -= 1
+            if self._capture_depth <= 0:
+                text = _compact_text(" ".join(self._capture_text))
+                if text and self._current is not None:
+                    if self._capture_field == "priceText":
+                        text = _made_in_china_normalize_price_text(text)
+                    self._current[self._capture_field] = text
+                self._capture_field = None
+                self._capture_depth = 0
+                self._capture_text = []
+
+    def _start_capture(self, field: str) -> None:
+        if self._capture_field is not None:
+            return
+        self._capture_field = field
+        self._capture_depth = 1
+        self._capture_text = []
+
+
+def _made_in_china_field_for_classes(classes: set[str]) -> str:
+    if classes & {"price-new", "price"}:
+        return "priceText"
+    if "moq-new" in classes:
+        return "moq"
+    if classes & {"compas-info", "address-info"}:
+        return "supplierLocation"
+    if "business-type-info" in classes:
+        return "businessType"
+    return ""
+
+
+def _made_in_china_result_limit(configured_limit: int, requested_limit: int | None) -> int:
+    try:
+        configured = int(configured_limit)
+    except (TypeError, ValueError):
+        configured = 5
+    try:
+        requested = int(requested_limit) if requested_limit is not None else configured
+    except (TypeError, ValueError):
+        requested = configured
+    return max(1, min(configured, requested, 50))
+
+
+def _made_in_china_product_payload(item: dict[str, Any], query_text: str) -> dict[str, Any] | None:
+    title = _compact_text(str(item.get("title") or ""))
+    product_url = str(item.get("productUrl") or "").strip()
+    if not title or not product_url:
+        return None
+    price_text = _compact_text(str(item.get("priceText") or ""))
+    attributes = {
+        "sourcePlatform": "made-in-china",
+        "madeInChinaPriceText": price_text,
+        "moq": _compact_text(str(item.get("moq") or "")),
+        "supplierLocation": _compact_text(str(item.get("supplierLocation") or "")),
+        "businessType": _compact_text(str(item.get("businessType") or "")),
+        "supplierUrl": str(item.get("supplierUrl") or "").strip(),
+        "position": str(item.get("position") or ""),
+        "discoveryQuery": _base_search_query(query_text),
+    }
+    product: dict[str, Any] = {
+        "title": title,
+        "productUrl": product_url,
+        "supplierName": _compact_text(str(item.get("supplierName") or "")) or (urlparse(product_url).hostname or ""),
+        "contacts": [],
+        "images": [str(item["imageUrl"])] if item.get("imageUrl") else [],
+        "attributes": {key: value for key, value in attributes.items() if value},
+    }
+    price = _made_in_china_single_price(price_text)
+    if price is not None:
+        product["price"] = price
+    currency = _made_in_china_currency(price_text)
+    if currency:
+        product["currency"] = currency
+    return product
+
+
+def _made_in_china_abs_url(value: str, base_url: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    return urljoin(base_url, raw)
+
+
+def _made_in_china_has_captcha(body: str) -> bool:
+    normalized = (body or "").lower()
+    return "fcaptcha" in normalized or "captcha.vemic.com" in normalized or "captcha" in normalized and "made-in-china" in normalized
+
+
+def _made_in_china_normalize_price_text(text: str) -> str:
+    compact = _compact_text(text.replace("US$US$", "US$").replace("$ $", "$"))
+    return re.sub(r"\s*-\s*", "-", compact)
+
+
+def _made_in_china_single_price(text: str) -> str | None:
+    if not text or "-" in text or "\u2013" in text or "\u2014" in text:
+        return None
+    return _price_from_text(text)
+
+
+def _made_in_china_currency(text: str) -> str | None:
+    if "US$" in text:
+        return "USD"
+    return _currency_from_text(text)
+
+
+def _compact_text(text: str) -> str:
+    return " ".join(str(text or "").split()).strip()
 
 
 @dataclass
@@ -1125,6 +1363,8 @@ def build_tool_registry(settings: Settings, model_provider: ModelProvider | None
     registry = ToolRegistry()
     if settings.browser_provider:
         registry.register("browser_mcp", build_browser_connector(settings, model_provider))
+    if settings.made_in_china_discovery_enabled:
+        registry.register("made_in_china", build_made_in_china_connector(settings))
     if settings.email_connector_provider:
         registry.register("email", build_email_connector(settings))
     if settings.email_inbound_provider:
@@ -1132,6 +1372,14 @@ def build_tool_registry(settings: Settings, model_provider: ModelProvider | None
     if settings.telegram_connector_provider:
         registry.register("telegram", build_telegram_connector(settings))
     return registry
+
+
+def build_made_in_china_connector(settings: Settings) -> MadeInChinaSearchConnector:
+    return MadeInChinaSearchConnector(
+        base_url=settings.made_in_china_base_url,
+        max_results=settings.made_in_china_max_results,
+        timeout_seconds=settings.made_in_china_timeout_seconds,
+    )
 
 
 def build_browser_connector(
