@@ -51,6 +51,30 @@ class FakeMcpClient:
         self.closed = True
 
 
+class UrlAwareMcpClient:
+    def __init__(self, page_payloads):
+        self.page_payloads = dict(page_payloads)
+        self.calls = []
+        self.current_url = ""
+        self.closed = False
+
+    def initialize(self):
+        pass
+
+    def call_tool(self, name, arguments):
+        self.calls.append((name, arguments))
+        if name == "browser_navigate":
+            self.current_url = arguments["url"]
+            return {"content": [{"type": "text", "text": "{}"}]}
+        if name == "browser_evaluate":
+            payload = self.page_payloads.get(self.current_url, {})
+            return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+        return {"content": [{"type": "text", "text": "{}"}]}
+
+    def close(self):
+        self.closed = True
+
+
 class FakeSmtp:
     instances = []
 
@@ -381,6 +405,8 @@ class ConnectorContractTest(unittest.TestCase):
             'og:title',
             'itemprop="price"',
             'mailto:',
+            'data-cfemail',
+            'contactLinks',
             't.me/',
             'normalizePrice',
         ]:
@@ -860,6 +886,242 @@ class ConnectorContractTest(unittest.TestCase):
         self.assertEqual("ai_internet", result.payload["source"]["mode"])
         self.assertEqual(1, len(result.payload["products"]))
 
+    def test_ai_internet_product_search_expands_b2b_supplier_queries(self):
+        model = FakeModelProvider([{"queries": ["Raspberry Pi 5 official supplier"]}, {"selected": []}])
+        web_search = FakeWebSearch([])
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: FakeMcpClient([]),
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=8,
+            candidate_limit=1,
+        )
+
+        result = connector.research("Raspberry Pi 5 8GB", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        searched = " ".join(web_search.queries).lower()
+        for expected in ["supplier", "manufacturer", "distributor", "wholesale", "moq", "stock", "contact"]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, searched)
+
+    def test_ai_internet_product_search_prefers_real_supplier_candidates(self):
+        model = FailingModelProvider()
+        web_search = FakeWebSearch(
+            [
+                WebSearchResult("Raspberry Pi review blog", "https://blog.example/articles/raspberry-pi-review"),
+                WebSearchResult("Raspberry Pi 5 distributor stock", "https://supplier.example/products/raspberry-pi-5"),
+                WebSearchResult("Login", "https://supplier.example/login"),
+            ]
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: FakeMcpClient(
+                [
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    '{"title":"Raspberry Pi 5 distributor stock",'
+                                    '"productUrl":"https://supplier.example/products/raspberry-pi-5",'
+                                    '"price":"80.00","currency":"USD",'
+                                    '"supplierName":"Supplier Example","contacts":[]}'
+                                ),
+                            }
+                        ]
+                    }
+                ]
+            ),
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=1,
+            candidate_limit=1,
+        )
+
+        result = connector.research("Raspberry Pi 5", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        product = result.payload["products"][0]
+        self.assertEqual("https://supplier.example/products/raspberry-pi-5", product["productUrl"])
+        self.assertEqual("distributor", product["attributes"]["supplierType"])
+        self.assertGreaterEqual(int(product["attributes"]["sourceConfidence"]), 70)
+
+    def test_ai_internet_product_search_enriches_contacts_from_supplier_domain(self):
+        model = FailingModelProvider()
+        web_search = FakeWebSearch(
+            [
+                WebSearchResult(
+                    "Industrial controller manufacturer",
+                    "https://supplier.example/products/ic-200",
+                    snippet="Manufacturer product page",
+                )
+            ]
+        )
+        client = UrlAwareMcpClient(
+            {
+                "https://supplier.example/products/ic-200": {
+                    "title": "Industrial controller IC-200",
+                    "productUrl": "https://supplier.example/products/ic-200",
+                    "supplierName": "Supplier Example",
+                    "contacts": [],
+                    "attributes": {},
+                },
+                "https://supplier.example/contact": {
+                    "title": "Contact Supplier Example",
+                    "productUrl": "https://supplier.example/contact",
+                    "supplierName": "Supplier Example",
+                    "contacts": [{"type": "email", "value": "sales@supplier.example"}],
+                    "attributes": {},
+                },
+            }
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: client,
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=1,
+            candidate_limit=1,
+        )
+
+        result = connector.research("Industrial controller IC-200", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        product = result.payload["products"][0]
+        self.assertEqual([{"type": "email", "value": "sales@supplier.example"}], product["contacts"])
+        self.assertEqual("100", product["attributes"]["contactConfidence"])
+        self.assertIn("https://supplier.example/contact", product["attributes"]["enrichmentPages"])
+
+    def test_ai_internet_product_search_uses_page_contact_links_for_enrichment(self):
+        model = FailingModelProvider()
+        web_search = FakeWebSearch(
+            [
+                WebSearchResult(
+                    "Sony headphones distributor stock",
+                    "https://supplier.example/products/sony-headphones",
+                    snippet="Distributor product page",
+                )
+            ]
+        )
+        client = UrlAwareMcpClient(
+            {
+                "https://supplier.example/products/sony-headphones": {
+                    "title": "Sony headphones",
+                    "productUrl": "https://supplier.example/products/sony-headphones",
+                    "supplierName": "Supplier Example",
+                    "contacts": [],
+                    "attributes": {
+                        "contactLinks": '["https://supplier.example/footer/contact-sales"]',
+                    },
+                },
+                "https://supplier.example/footer/contact-sales": {
+                    "title": "Contact sales",
+                    "productUrl": "https://supplier.example/footer/contact-sales",
+                    "supplierName": "Supplier Example",
+                    "contacts": [{"type": "email", "value": "sales@supplier.example"}],
+                    "attributes": {},
+                },
+            }
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: client,
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=1,
+            candidate_limit=1,
+        )
+
+        result = connector.research("sony headphones", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        product = result.payload["products"][0]
+        self.assertEqual([{"type": "email", "value": "sales@supplier.example"}], product["contacts"])
+        self.assertIn("https://supplier.example/footer/contact-sales", product["attributes"]["enrichmentPages"])
+
+    def test_ai_internet_product_search_fills_candidates_when_model_selects_too_few(self):
+        model = FakeModelProvider(
+            [
+                {"queries": ["sony headphones supplier"]},
+                {
+                    "selected": [
+                        {
+                            "title": "Sony headphones supplier A",
+                            "url": "https://supplier-a.example/products/sony-headphones",
+                            "reason": "direct product page",
+                        }
+                    ]
+                },
+            ]
+        )
+        web_search = FakeWebSearch(
+            [
+                WebSearchResult("Sony headphones supplier A", "https://supplier-a.example/products/sony-headphones"),
+                WebSearchResult("Sony headphones distributor stock", "https://supplier-b.example/products/sony-headphones"),
+                WebSearchResult("Sony headphones manufacturer", "https://supplier-c.example/products/sony-headphones"),
+            ]
+        )
+        client = UrlAwareMcpClient(
+            {
+                "https://supplier-a.example/products/sony-headphones": {
+                    "title": "Sony headphones supplier A",
+                    "productUrl": "https://supplier-a.example/products/sony-headphones",
+                    "contacts": [],
+                },
+                "https://supplier-b.example/products/sony-headphones": {
+                    "title": "Sony headphones supplier B",
+                    "productUrl": "https://supplier-b.example/products/sony-headphones",
+                    "contacts": [],
+                },
+                "https://supplier-c.example/products/sony-headphones": {
+                    "title": "Sony headphones supplier C",
+                    "productUrl": "https://supplier-c.example/products/sony-headphones",
+                    "contacts": [],
+                },
+            }
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: client,
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=1,
+            candidate_limit=1,
+        )
+
+        result = connector.research("sony headphones", max_results=3)
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(3, result.payload["source"]["candidatesVisited"])
+        self.assertEqual(3, len(result.payload["products"]))
+
     def test_ai_internet_product_search_uses_max_results_as_candidate_breadth(self):
         model = FailingModelProvider()
         web_search = FakeWebSearch(
@@ -903,6 +1165,87 @@ class ConnectorContractTest(unittest.TestCase):
 
         self.assertTrue(result.success, result.error_message)
         self.assertEqual(3, result.payload["source"]["candidatesVisited"])
+
+    def test_ai_internet_product_search_stops_after_enough_products(self):
+        model = FailingModelProvider()
+        web_search = FakeWebSearch(
+            [
+                WebSearchResult("Product A supplier", "https://supplier.example/products/a"),
+                WebSearchResult("Product B supplier", "https://supplier.example/products/b"),
+                WebSearchResult("Product C supplier", "https://supplier.example/products/c"),
+            ]
+        )
+        client = UrlAwareMcpClient(
+            {
+                "https://supplier.example/products/a": {
+                    "title": "Product A",
+                    "productUrl": "https://supplier.example/products/a",
+                    "contacts": [{"type": "email", "value": "a@supplier.example"}],
+                },
+                "https://supplier.example/products/b": {
+                    "title": "Product B",
+                    "productUrl": "https://supplier.example/products/b",
+                    "contacts": [{"type": "email", "value": "b@supplier.example"}],
+                },
+                "https://supplier.example/products/c": {
+                    "title": "Product C",
+                    "productUrl": "https://supplier.example/products/c",
+                    "contacts": [{"type": "email", "value": "c@supplier.example"}],
+                },
+            }
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: client,
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+            max_pages=10,
+        )
+        connector = AiInternetProductSearchConnector(
+            model_provider=model,
+            web_search=web_search,
+            browser_connector=browser,
+            query_count=1,
+            candidate_limit=10,
+        )
+
+        result = connector.research("Product supplier", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(1, result.payload["source"]["candidatesVisited"])
+        self.assertEqual(1, len(result.payload["products"]))
+
+    def test_contact_enrichment_can_be_disabled_for_fast_search(self):
+        client = UrlAwareMcpClient(
+            {
+                "https://supplier.example/products/a": {
+                    "title": "Product A",
+                    "productUrl": "https://supplier.example/products/a",
+                    "contacts": [],
+                    "attributes": {"contactLinks": '["https://supplier.example/contact"]'},
+                },
+                "https://supplier.example/contact": {
+                    "title": "Contact",
+                    "productUrl": "https://supplier.example/contact",
+                    "contacts": [{"type": "email", "value": "sales@supplier.example"}],
+                },
+            }
+        )
+        browser = PlaywrightMcpBrowserConnector(
+            mcp_client_factory=lambda: client,
+            supplier_site_url="https://supplier.test",
+            allowed_domains=set(),
+            allow_public_internet=True,
+            contact_enrichment_pages=0,
+        )
+
+        result = browser.extract_products_from_links(
+            [{"title": "Product A", "url": "https://supplier.example/products/a"}],
+            max_results=1,
+        )
+
+        self.assertEqual([], result["products"][0]["contacts"])
+        self.assertNotIn("https://supplier.example/contact", [call[1].get("url") for call in client.calls])
 
     def test_ai_internet_product_search_falls_back_when_model_json_is_invalid(self):
         model = FailingModelProvider()
@@ -948,7 +1291,14 @@ class ConnectorContractTest(unittest.TestCase):
         result = connector.research("Industrial CNC Controller IC-200")
 
         self.assertTrue(result.success, result.error_message)
-        self.assertEqual(["Industrial CNC Controller IC-200"], web_search.queries)
+        self.assertEqual(
+            [
+                "Industrial CNC Controller IC-200",
+                "Industrial CNC Controller IC-200 supplier",
+                "Industrial CNC Controller IC-200 manufacturer",
+            ],
+            web_search.queries,
+        )
         self.assertEqual(2, len(model.prompts))
         self.assertEqual(1, len(result.payload["products"]))
 

@@ -35,9 +35,18 @@ class ContactAttemptStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ContractDraftStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    READY = "ready"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class AgentTaskType(str, Enum):
     PRODUCT_SEARCH = "product_search"
     SUPPLIER_CONTACT = "supplier_contact"
+    CONTRACT_DRAFT = "contract_draft"
 
 
 class ContactType(str, Enum):
@@ -59,6 +68,19 @@ class ConversationMessageStatus(str, Enum):
 
 class ProductValidationError(ValueError):
     pass
+
+
+UNSAFE_CONTRACT_PATTERNS = [
+    r"\bconfirm(?:ed)?\s+the\s+order\b",
+    r"\border\s+is\s+confirmed\b",
+    r"\bwill\s+pay\b",
+    r"\bpay\s+now\b",
+    r"\bsigned\s+by\b",
+    r"\bsignature\b",
+    r"\bbank\s+account\b",
+    r"\bpayment\s+details\b",
+    r"\blegally\s+binding\b",
+]
 
 
 def utcnow() -> datetime:
@@ -428,6 +450,77 @@ class ConversationMessage:
         self.requires_user_approval = True
         self.approval_reason = reason.strip() or "User approval required"
         self.updated_at = utcnow()
+
+
+@dataclass
+class ContractDraft:
+    product_id: UUID
+    supplier_contact_id: UUID
+    supplier_name: str
+    id: UUID = field(default_factory=uuid4)
+    agent_task_id: UUID | None = None
+    status: ContractDraftStatus = ContractDraftStatus.QUEUED
+    title: str = "Contract draft"
+    extracted_data: dict[str, Any] = field(default_factory=dict)
+    draft_text: str | None = None
+    file_name: str = ""
+    content_type: str = "text/plain; charset=utf-8"
+    error_message: str | None = None
+    created_at: datetime = field(default_factory=utcnow)
+    updated_at: datetime = field(default_factory=utcnow)
+    completed_at: datetime | None = None
+
+    @classmethod
+    def create(cls, product_id: UUID, supplier_contact_id: UUID, supplier_name: str | None) -> "ContractDraft":
+        name = (supplier_name or "Supplier").strip() or "Supplier"
+        draft = cls(product_id=product_id, supplier_contact_id=supplier_contact_id, supplier_name=name)
+        draft.file_name = f"contract-draft-{draft.id}.txt"
+        return draft
+
+    def transition_to(self, next_status: ContractDraftStatus) -> None:
+        allowed = {
+            ContractDraftStatus.QUEUED: {ContractDraftStatus.RUNNING, ContractDraftStatus.CANCELLED},
+            ContractDraftStatus.RUNNING: {ContractDraftStatus.READY, ContractDraftStatus.FAILED, ContractDraftStatus.CANCELLED},
+            ContractDraftStatus.READY: set(),
+            ContractDraftStatus.FAILED: set(),
+            ContractDraftStatus.CANCELLED: set(),
+        }
+        if next_status not in allowed[self.status]:
+            raise ValueError(f"invalid contract draft transition: {self.status} -> {next_status}")
+        self.status = next_status
+        self.updated_at = utcnow()
+        if next_status in {ContractDraftStatus.READY, ContractDraftStatus.FAILED, ContractDraftStatus.CANCELLED}:
+            self.completed_at = self.completed_at or self.updated_at
+
+    def mark_ready(self, draft_text: str, extracted_data: dict[str, Any], title: str | None = None) -> None:
+        validate_contract_draft_text(draft_text)
+        self.draft_text = draft_text.strip()
+        self.extracted_data = dict(extracted_data or {})
+        self.title = (title or self.title).strip() or "Contract draft"
+        self.error_message = None
+        self.transition_to(ContractDraftStatus.READY)
+
+    def mark_failed(self, error_message: str) -> None:
+        self.error_message = error_message.strip() or "contract draft generation failed"
+        if self.status == ContractDraftStatus.QUEUED:
+            self.transition_to(ContractDraftStatus.RUNNING)
+        if self.status == ContractDraftStatus.RUNNING:
+            self.transition_to(ContractDraftStatus.FAILED)
+
+    def is_downloadable(self) -> bool:
+        return self.status == ContractDraftStatus.READY and bool(self.draft_text)
+
+
+def validate_contract_draft_text(text: str) -> None:
+    normalized = text.strip()
+    if not normalized:
+        raise ValueError("contract draft text is required")
+    if "draft" not in normalized.lower():
+        raise ValueError("contract draft must include a visible draft marker")
+    lowered = normalized.lower()
+    for pattern in UNSAFE_CONTRACT_PATTERNS:
+        if re.search(pattern, lowered):
+            raise ValueError("contract draft contains prohibited commitment or payment language")
 
 
 @dataclass

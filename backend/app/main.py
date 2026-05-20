@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from html import escape
 import threading
 import logging
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .agent import AgentRuntime, normalize_message_language, normalize_message_style
+from .agent import AgentRuntime, answer_internal_product_assistant, normalize_message_language, normalize_message_style
 from .config import Settings
 from .connectors import build_tool_registry
 from .domain import (
@@ -19,6 +20,9 @@ from .domain import (
     AgentTaskType,
     ContactAttempt,
     ContactAttemptStatus,
+    ContactType,
+    ContractDraft,
+    ContractDraftStatus,
     ConversationMessage,
     Product,
     SearchRequest,
@@ -26,7 +30,14 @@ from .domain import (
 )
 from .model_providers import LocalDemoModelProvider, OllamaModelProvider
 from .repositories import InMemoryRepository
-from .workers import process_product_search, process_supplier_contact, run_gmail_inbound_sync_loop, sync_gmail_inbound_messages
+from .workers import (
+    _apply_supplier_reply_analysis,
+    process_contract_draft,
+    process_product_search,
+    process_supplier_contact,
+    run_gmail_inbound_sync_loop,
+    sync_gmail_inbound_messages,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +75,10 @@ class AgentReplyPayload(BaseModel):
 
 class GmailSyncPayload(BaseModel):
     requireAiReplyApproval: bool = False
+
+
+class ProductAssistantPayload(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
 
 
 class ConfiguredModelProvider:
@@ -209,10 +224,17 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
 
     @app.get("/api/search-requests/{request_id}/products")
     def list_request_products(request_id: UUID):
-        if repo.get_search_request(request_id) is None:
+        request = repo.get_search_request(request_id)
+        if request is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="search request not found")
         products = repo.list_products_for_request(request_id)
-        return {"items": [serialize_product_card(product, repo) for product in products], "total": len(products)}
+        duplicates = list_duplicate_supplier_candidates(request, repo)
+        return {
+            "items": [serialize_product_card(product, repo) for product in products],
+            "duplicates": duplicates,
+            "total": len(products),
+            "duplicatesTotal": len(duplicates),
+        }
 
     @app.get("/api/products/{product_id}")
     def get_product(product_id: UUID):
@@ -245,7 +267,7 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
                 detail="product has no supplier contact available",
             )
 
-        selected = select_contact(contacts, payload.supplierContactId if payload else None)
+        selected = select_contact(contacts, payload.supplierContactId if payload else None, product=product)
         language = normalize_message_language(payload.language if payload else None)
         style_value = normalize_message_style(payload.style if payload else None)
         attempt = ContactAttempt.create(product.id, selected.id, selected.contact_type, "pending")
@@ -292,6 +314,7 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         repo.add_conversation_message(message)
+        _apply_supplier_reply_analysis(repo, _runtime(), product, message)
         if attempt.status == ContactAttemptStatus.SENT:
             attempt.transition_to(ContactAttemptStatus.RESPONDED)
         return serialize_conversation_message(message)
@@ -331,6 +354,84 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
             background_tasks.add_task(process_supplier_contact, repo, _runtime(), task.id)
         return serialize_contact_attempt(attempt)
 
+    @app.post("/api/products/{product_id}/assistant-chat")
+    def product_assistant_chat(product_id: UUID, payload: ProductAssistantPayload):
+        product = repo.get_product(product_id)
+        if product is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
+        user_message = create_internal_assistant_message("user", payload.message)
+        assistant_messages = list_internal_assistant_messages(product)
+        assistant_messages.append(user_message)
+        try:
+            answer = answer_internal_product_assistant(
+                _runtime().model_provider,
+                product,
+                repo.list_contacts_for_product(product.id),
+                repo.list_conversation_messages_for_product(product.id),
+                payload.message,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        assistant_messages.append(create_internal_assistant_message("assistant", answer))
+        save_internal_assistant_messages(product, assistant_messages)
+        return {"reply": answer, "messages": assistant_messages}
+
+    @app.post("/api/products/{product_id}/contracts", status_code=status.HTTP_201_CREATED)
+    def create_contract_draft(product_id: UUID, background_tasks: BackgroundTasks):
+        product = repo.get_product(product_id)
+        if product is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
+        contacts = repo.list_contacts_for_product(product_id)
+        if not contacts:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="product has no supplier contact available")
+        selected = select_best_contact(contacts, product)
+        draft = ContractDraft.create(product.id, selected.id, product.supplier_name)
+        task = AgentTask.create(
+            AgentTaskType.CONTRACT_DRAFT,
+            {
+                "productId": str(product.id),
+                "supplierContactId": str(selected.id),
+                "contractDraftId": str(draft.id),
+            },
+        )
+        draft.agent_task_id = task.id
+        repo.add_agent_task(task)
+        repo.contracts.add_contract_draft(draft)
+        if settings.auto_process_contract_tasks:
+            background_tasks.add_task(process_contract_draft, repo, _runtime(), task.id)
+        return serialize_contract_draft(draft, include_text=False)
+
+    @app.get("/api/products/{product_id}/contracts")
+    def list_contract_drafts(product_id: UUID):
+        if repo.get_product(product_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
+        return {
+            "items": [
+                serialize_contract_draft(draft, include_text=False)
+                for draft in repo.contracts.list_contract_drafts_for_product(product_id)
+            ]
+        }
+
+    @app.get("/api/contracts/{contract_id}")
+    def get_contract_draft(contract_id: UUID):
+        draft = repo.contracts.get_contract_draft(contract_id)
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="contract draft not found")
+        return serialize_contract_draft(draft, include_text=True)
+
+    @app.get("/api/contracts/{contract_id}/download")
+    def download_contract_draft(contract_id: UUID):
+        draft = repo.contracts.get_contract_draft(contract_id)
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="contract draft not found")
+        if not draft.is_downloadable():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="contract draft is not ready for download")
+        return Response(
+            content=draft.draft_text or "",
+            media_type=draft.content_type,
+            headers={"Content-Disposition": f'attachment; filename="{draft.file_name}"'},
+        )
+
     @app.post("/api/conversations/sync-gmail")
     def sync_gmail(payload: GmailSyncPayload | None = None):
         try:
@@ -347,6 +448,19 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
         except RuntimeError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
+    @app.get("/api/products/{product_id}/export.xlsx")
+    def export_product(product_id: UUID):
+        product = repo.get_product(product_id)
+        if product is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="product not found")
+        content = build_product_excel_html(product, repo)
+        filename = f"product-supplier-{product.id}.xls"
+        return Response(
+            content=content,
+            media_type="application/vnd.ms-excel; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     def _runtime() -> AgentRuntime:
         if app.state.runtime is None:
             app.state.runtime = build_runtime(settings)
@@ -355,13 +469,43 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
     return app
 
 
-def select_contact(contacts: list[SupplierContact], contact_id: UUID | None) -> SupplierContact:
+def select_contact(contacts: list[SupplierContact], contact_id: UUID | None, product: Product | None = None) -> SupplierContact:
     if contact_id is None:
-        return contacts[0]
+        return select_best_contact(contacts, product)
     for contact in contacts:
         if contact.id == contact_id:
             return contact
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="supplier contact not found")
+
+
+def select_best_contact(contacts: list[SupplierContact], product: Product | None = None) -> SupplierContact:
+    ranked = sorted(contacts, key=lambda contact: (-contact_quality_score(contact, product), contact.contact_value.lower()))
+    return ranked[0]
+
+
+def contact_quality_score(contact: SupplierContact, product: Product | None = None) -> int:
+    score = 40
+    value = contact.contact_value.lower()
+    if contact.is_primary:
+        score += 20
+    if contact.contact_type == ContactType.EMAIL:
+        score += 25
+        local, _, domain = value.partition("@")
+        if local in {"sales", "b2b", "wholesale", "orders", "business", "export"}:
+            score += 25
+        elif local in {"info", "contact", "support", "hello"}:
+            score += 12
+        if product and product.source_domain and domain and product.source_domain.lower().endswith(domain):
+            score += 18
+        if domain in {"gmail.com", "outlook.com", "hotmail.com", "yahoo.com"}:
+            score -= 12
+    elif contact.contact_type == ContactType.TELEGRAM:
+        score += 15
+    try:
+        score += int(contact.metadata.get("confidence", 0))
+    except (TypeError, ValueError):
+        pass
+    return max(0, min(100, score))
 
 
 def get_product_contact(repo: InMemoryRepository, product_id: UUID, contact_id: UUID) -> SupplierContact:
@@ -399,6 +543,68 @@ def serialize_search_request(request: SearchRequest, repo: InMemoryRepository) -
     }
 
 
+def list_duplicate_supplier_candidates(request: SearchRequest, repo: InMemoryRepository) -> list[dict[str, Any]]:
+    if request.agent_task_id is None:
+        return []
+    task = repo.get_agent_task(request.agent_task_id)
+    if task is None:
+        return []
+    duplicates = []
+    for index, error in enumerate((task.output_payload or {}).get("errors") or []):
+        if not isinstance(error, dict):
+            continue
+        reasons = [str(reason) for reason in error.get("errors") or []]
+        if "duplicate supplier for search request" not in reasons:
+            continue
+        raw = error.get("raw") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        duplicates.append(serialize_duplicate_supplier_candidate(raw, request.id, index, reasons))
+    return duplicates
+
+
+def serialize_duplicate_supplier_candidate(
+    raw: dict[str, Any],
+    search_request_id: UUID,
+    index: int,
+    reasons: list[str],
+) -> dict[str, Any]:
+    product_url = str(raw.get("productUrl") or raw.get("product_url") or "")
+    contacts = []
+    for contact in raw.get("contacts") or []:
+        if not isinstance(contact, dict):
+            continue
+        contact_type = str(contact.get("type") or contact.get("contactType") or "").strip().lower()
+        contact_value = str(contact.get("value") or contact.get("contactValue") or "").strip()
+        if not contact_type or not contact_value:
+            continue
+        contacts.append(
+            {
+                "id": f"duplicate-{index}-contact-{len(contacts)}",
+                "contactType": contact_type,
+                "contactValue": contact_value,
+                "isPrimary": len(contacts) == 0,
+                "isPreferred": len(contacts) == 0,
+            }
+        )
+    return {
+        "id": f"duplicate-{search_request_id}-{index}",
+        "searchRequestId": str(search_request_id),
+        "title": str(raw.get("title") or "Duplicate supplier candidate"),
+        "description": raw.get("description"),
+        "price": serialize_decimal(raw.get("price")),
+        "currency": raw.get("currency"),
+        "productUrl": product_url,
+        "supplierName": raw.get("supplierName") or raw.get("supplier_name"),
+        "sourceDomain": raw.get("sourceDomain") or raw.get("source_domain"),
+        "images": list(raw.get("images") or []),
+        "attributes": dict(raw.get("attributes") or {}),
+        "contacts": contacts,
+        "duplicateReason": "; ".join(reasons),
+        "isDuplicate": True,
+    }
+
+
 def serialize_product_card(product: Product, repo: InMemoryRepository | None = None) -> dict[str, Any]:
     card = {
         "id": str(product.id),
@@ -420,20 +626,25 @@ def serialize_product_card(product: Product, repo: InMemoryRepository | None = N
                 "contactType": contact.contact_type.value,
                 "contactValue": contact.contact_value,
                 "isPrimary": contact.is_primary,
+                "qualityScore": contact_quality_score(contact, product),
+                "isPreferred": contact.id == select_best_contact(repo.list_contacts_for_product(product.id), product).id,
             }
             for contact in repo.list_contacts_for_product(product.id)
         ]
+        card["supplierComparison"] = calculate_supplier_comparison(product, repo)
     return card
 
 
 def serialize_product_detail(product: Product, repo: InMemoryRepository) -> dict[str, Any]:
-    detail = serialize_product_card(product)
+    detail = serialize_product_card(product, repo)
     detail["contacts"] = [
         {
             "id": str(contact.id),
             "contactType": contact.contact_type.value,
             "contactValue": contact.contact_value,
             "isPrimary": contact.is_primary,
+            "qualityScore": contact_quality_score(contact, product),
+            "isPreferred": contact.id == select_best_contact(repo.list_contacts_for_product(product.id), product).id,
         }
         for contact in repo.list_contacts_for_product(product.id)
     ]
@@ -444,7 +655,252 @@ def serialize_product_detail(product: Product, repo: InMemoryRepository) -> dict
         serialize_conversation_message(message)
         for message in repo.list_conversation_messages_for_product(product.id)
     ]
+    detail["assistantMessages"] = list_internal_assistant_messages(product)
     return detail
+
+
+def create_internal_assistant_message(role: str, body: str) -> dict[str, str]:
+    return {
+        "id": str(uuid4()),
+        "role": role,
+        "body": body.strip(),
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def list_internal_assistant_messages(product: Product) -> list[dict[str, str]]:
+    raw_messages = product.attributes.get("internalAssistantMessages")
+    if not isinstance(raw_messages, list):
+        return []
+    messages: list[dict[str, str]] = []
+    for raw_message in raw_messages:
+        if not isinstance(raw_message, dict):
+            continue
+        role = str(raw_message.get("role") or "").strip()
+        body = str(raw_message.get("body") or "").strip()
+        if role not in {"user", "assistant"} or not body:
+            continue
+        messages.append(
+            {
+                "id": str(raw_message.get("id") or uuid4()),
+                "role": role,
+                "body": body,
+                "createdAt": str(raw_message.get("createdAt") or ""),
+            }
+        )
+    return messages
+
+
+def save_internal_assistant_messages(product: Product, messages: list[dict[str, str]]) -> None:
+    product.attributes["internalAssistantMessages"] = messages[-80:]
+
+
+def calculate_supplier_comparison(product: Product, repo: InMemoryRepository) -> dict[str, Any]:
+    contacts = repo.list_contacts_for_product(product.id)
+    attempts = repo.list_attempts_for_product(product.id)
+    messages = repo.list_conversation_messages_for_product(product.id)
+    comparable_products = [
+        candidate
+        for candidate in repo.list_products_for_request(product.search_request_id)
+        if (
+            product.search_request_id is not None
+            and candidate.price is not None
+            and product.currency
+            and candidate.currency == product.currency
+            and Decimal(candidate.price) > 0
+        )
+    ]
+    min_price = min((Decimal(candidate.price) for candidate in comparable_products), default=None)
+    price_score = score_price(product, min_price)
+    contact_score = score_contactability(contacts)
+    response_score = score_supplier_response(attempts, messages)
+    completeness_score = score_data_completeness(product, contacts)
+    source_score = score_source_traceability(product)
+    communication_score = score_communication(product, messages)
+    contact_quality_score_value = max((contact_quality_score(contact, product) for contact in contacts), default=20)
+    overall = round(
+        price_score * 0.25
+        + contact_score * 0.15
+        + contact_quality_score_value * 0.15
+        + response_score * 0.15
+        + communication_score * 0.15
+        + completeness_score * 0.10
+        + source_score * 0.05
+    )
+    return {
+        "overallRating": overall,
+        "ratingLabel": supplier_rating_label(overall),
+        "metrics": {
+            "priceScore": price_score,
+            "contactabilityScore": contact_score,
+            "responseScore": response_score,
+            "communicationScore": communication_score,
+            "contactQualityScore": contact_quality_score_value,
+            "dataCompletenessScore": completeness_score,
+            "sourceTraceabilityScore": source_score,
+        },
+        "priceRank": price_rank(product, comparable_products),
+        "priceDeltaPercent": price_delta_percent(product, min_price),
+        "comparedProductsCount": len(comparable_products),
+    }
+
+
+def score_price(product: Product, min_price: Decimal | None) -> int:
+    if product.price is None or min_price is None or Decimal(product.price) <= 0:
+        return 45
+    return int(max(0, min(100, round((min_price / Decimal(product.price)) * 100))))
+
+
+def score_contactability(contacts: list[SupplierContact]) -> int:
+    types = {contact.contact_type for contact in contacts}
+    if ContactType.EMAIL in types and ContactType.TELEGRAM in types:
+        return 100
+    if ContactType.EMAIL in types:
+        return 85
+    if ContactType.TELEGRAM in types:
+        return 75
+    return 20
+
+
+def score_supplier_response(attempts: list[ContactAttempt], messages: list[ConversationMessage]) -> int:
+    if any(message.direction.value == "inbound" for message in messages):
+        return 100
+    statuses = {attempt.status for attempt in attempts}
+    if ContactAttemptStatus.RESPONDED in statuses:
+        return 95
+    if ContactAttemptStatus.SENT in statuses:
+        return 80
+    if statuses & {ContactAttemptStatus.QUEUED, ContactAttemptStatus.RUNNING}:
+        return 55
+    if ContactAttemptStatus.FAILED in statuses:
+        return 20
+    return 40
+
+
+def score_communication(product: Product, messages: list[ConversationMessage]) -> int:
+    raw = product.attributes.get("communicationScore")
+    if raw is not None:
+        try:
+            return max(0, min(100, int(float(str(raw)))))
+        except (TypeError, ValueError):
+            pass
+    inbound_count = sum(1 for message in messages if message.direction.value == "inbound")
+    outbound_count = sum(1 for message in messages if message.direction.value == "outbound")
+    if inbound_count >= 2:
+        return 85
+    if inbound_count == 1 and outbound_count >= 1:
+        return 75
+    if inbound_count == 1:
+        return 65
+    return 40
+
+
+def score_data_completeness(product: Product, contacts: list[SupplierContact]) -> int:
+    checks = [
+        bool(product.title),
+        bool(product.product_url),
+        product.price is not None,
+        bool(product.currency),
+        bool(product.supplier_name),
+        bool(product.description),
+        bool(product.images),
+        bool(contacts),
+    ]
+    return round(sum(1 for value in checks if value) / len(checks) * 100)
+
+
+def score_source_traceability(product: Product) -> int:
+    if product.product_url.startswith("https://") and product.source_domain:
+        return 100
+    if product.product_url.startswith("http://") and product.source_domain:
+        return 80
+    if product.product_url:
+        return 55
+    return 20
+
+
+def build_product_excel_html(product: Product, repo: InMemoryRepository) -> str:
+    detail = serialize_product_detail(product, repo)
+    comparison = detail.get("supplierComparison") or {}
+    metrics = comparison.get("metrics") or {}
+    analysis = product.attributes.get("supplierReplyAnalysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
+    rows = [
+        ("Product", product.title),
+        ("Product URL", product.product_url),
+        ("Supplier", product.supplier_name or ""),
+        ("Source domain", product.source_domain or ""),
+        ("Price", f"{serialize_decimal(product.price) or ''} {product.currency or ''}".strip()),
+        ("Overall rating", str(comparison.get("overallRating", ""))),
+        ("Rating label", str(comparison.get("ratingLabel", ""))),
+        ("Contact score", str(metrics.get("contactabilityScore", ""))),
+        ("Contact quality score", str(metrics.get("contactQualityScore", ""))),
+        ("Communication score", str(metrics.get("communicationScore", ""))),
+        ("Response score", str(metrics.get("responseScore", ""))),
+        ("AI reply summary", str(analysis.get("summary") or product.attributes.get("supplierReplySummary") or "")),
+        ("AI next step", str(analysis.get("nextStep") or product.attributes.get("supplierReplyNextStep") or "")),
+        ("Extracted price", str(analysis.get("price") or product.attributes.get("price") or "")),
+        ("Extracted currency", str(analysis.get("currency") or product.attributes.get("currency") or "")),
+        ("Extracted MOQ", str(analysis.get("moq") or product.attributes.get("supplierMoq") or "")),
+        ("Extracted lead time", str(analysis.get("leadTime") or product.attributes.get("supplierLeadTime") or "")),
+        ("Availability", str(analysis.get("availability") or product.attributes.get("supplierAvailability") or "")),
+        ("Payment terms", str(analysis.get("paymentTerms") or product.attributes.get("supplierPaymentTerms") or "")),
+        ("Delivery terms", str(analysis.get("deliveryTerms") or product.attributes.get("supplierDeliveryTerms") or "")),
+        ("Risk flags", str(analysis.get("riskFlags") or product.attributes.get("supplierRiskFlags") or "")),
+    ]
+    contact_rows = [
+        (
+            f"{contact['contactType']} contact",
+            f"{contact['contactValue']} | preferred={contact.get('isPreferred')} | quality={contact.get('qualityScore')}",
+        )
+        for contact in detail.get("contacts", [])
+    ]
+    message_rows = [
+        (
+            f"{message['direction']} {message['status']}",
+            f"{message.get('subject') or ''}\n{message.get('body') or ''}",
+        )
+        for message in detail.get("conversationMessages", [])
+    ]
+    html_rows = "\n".join(
+        f"<tr><th>{escape(str(label))}</th><td>{escape(str(value))}</td></tr>"
+        for label, value in rows + contact_rows + message_rows
+    )
+    return (
+        "<html><head><meta charset=\"utf-8\"></head><body>"
+        "<table>"
+        "<tr><th colspan=\"2\">Product and supplier information</th></tr>"
+        f"{html_rows}"
+        "</table>"
+        "</body></html>"
+    )
+
+
+def price_rank(product: Product, comparable_products: list[Product]) -> int | None:
+    if product.price is None or not comparable_products:
+        return None
+    ordered_prices = sorted({Decimal(candidate.price) for candidate in comparable_products if candidate.price is not None})
+    try:
+        return ordered_prices.index(Decimal(product.price)) + 1
+    except ValueError:
+        return None
+
+
+def price_delta_percent(product: Product, min_price: Decimal | None) -> int | None:
+    if product.price is None or min_price is None or min_price <= 0:
+        return None
+    return int(round(((Decimal(product.price) - min_price) / min_price) * 100))
+
+
+def supplier_rating_label(score: int) -> str:
+    if score >= 85:
+        return "excellent"
+    if score >= 70:
+        return "strong"
+    if score >= 55:
+        return "average"
+    return "weak"
 
 
 def serialize_conversation_message(message: ConversationMessage) -> dict[str, Any]:
@@ -487,6 +943,32 @@ def serialize_contact_attempt(attempt: ContactAttempt) -> dict[str, Any]:
         "sentAt": attempt.sent_at.isoformat() if attempt.sent_at else None,
         "completedAt": attempt.completed_at.isoformat() if attempt.completed_at else None,
     }
+
+
+def serialize_contract_draft(draft: ContractDraft, include_text: bool = False) -> dict[str, Any]:
+    missing_fields = draft.extracted_data.get("missingFields") or draft.extracted_data.get("missing_fields") or []
+    if not isinstance(missing_fields, list):
+        missing_fields = [str(missing_fields)]
+    payload = {
+        "id": str(draft.id),
+        "productId": str(draft.product_id),
+        "supplierContactId": str(draft.supplier_contact_id),
+        "agentTaskId": str(draft.agent_task_id) if draft.agent_task_id else None,
+        "supplierName": draft.supplier_name,
+        "status": draft.status.value,
+        "title": draft.title,
+        "extractedData": draft.extracted_data,
+        "missingFields": [str(value) for value in missing_fields],
+        "fileName": draft.file_name,
+        "contentType": draft.content_type,
+        "errorMessage": draft.error_message,
+        "createdAt": draft.created_at.isoformat(),
+        "updatedAt": draft.updated_at.isoformat(),
+        "completedAt": draft.completed_at.isoformat() if draft.completed_at else None,
+    }
+    if include_text:
+        payload["draftText"] = draft.draft_text
+    return payload
 
 
 def serialize_decimal(value: Decimal | None) -> str | None:

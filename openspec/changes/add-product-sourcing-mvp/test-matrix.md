@@ -55,4 +55,5 @@ Status values:
 | TC-E2E-040 | No autonomous purchase | webui, supplier-contact | 5, 8 | Automated |
 | TC-E2E-041 | No CRM functionality | webui | 8 | Automated |
 | TC-E2E-042 | No mass messaging | webui, supplier-contact | 8 | Automated |
+| TC-E2E-043 | Contract draft generation remains non-binding | contract-drafts | add-contract-drafts 2-6 | Automated |
 | TC-E2E-ACCEPTANCE-001 | Full happy path | all capabilities | 9, 11, 13 | Planned |

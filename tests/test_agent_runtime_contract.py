@@ -119,6 +119,7 @@ class AgentRuntimeContractTest(unittest.TestCase):
             model,
             "E2E UAV Flight Controller FC-100",
             "https://supplier.test/products/fc-100",
+            language="en",
         )
 
         errors = SafeMessagePolicy.validate(message)
@@ -174,17 +175,98 @@ class AgentRuntimeContractTest(unittest.TestCase):
         self.assertEqual(2, len(model.prompts))
         self.assertIn("missing exact product title", model.prompts[1])
 
-    def test_generate_supplier_message_fails_when_model_correction_is_unusable(self):
+    def test_generate_supplier_message_uses_safe_fallback_when_model_correction_is_unusable(self):
         model = SequenceModelProvider([{"text": ""}, {"text": "ok"}])
 
-        with self.assertRaises(RuntimeError):
-            generate_supplier_message(
-                model,
-                "E2E UAV Flight Controller FC-100",
-                "https://supplier.test/products/fc-100",
-            )
+        message = generate_supplier_message(
+            model,
+            "E2E UAV Flight Controller FC-100",
+            "https://supplier.test/products/fc-100",
+            language="en",
+        )
 
         self.assertEqual(2, len(model.prompts))
+        self.assertEqual([], SafeMessagePolicy.validate(message))
+        self.assertIn("E2E UAV Flight Controller FC-100", message)
+        self.assertIn("https://supplier.test/products/fc-100", message)
+
+    def test_generate_supplier_message_respects_russian_selection_when_model_writes_english(self):
+        model = SequenceModelProvider(
+            [
+                {"reply": valid_initial_message()},
+                {"reply": valid_initial_message()},
+            ]
+        )
+
+        message = generate_supplier_message(
+            model,
+            "E2E UAV Flight Controller FC-100",
+            "https://supplier.test/products/fc-100",
+            language="ru",
+            style="formal",
+        )
+
+        self.assertEqual([], SafeMessagePolicy.validate(message))
+        self.assertIn("Здравствуйте", message)
+        self.assertIn("актуальную цену", message)
+        self.assertNotIn("Please share", message)
+
+    def test_generate_supplier_reply_uses_safe_fallback_when_model_unavailable(self):
+        contact = SupplierContact.create(ContactType.EMAIL, "supplier@example.test")
+        product = Product(
+            title="E2E Servo Drive",
+            product_url="https://supplier.test/products/servo-drive",
+            contacts=[contact],
+        )
+        contact.product_id = product.id
+        inbound = ConversationMessage.create_inbound(
+            product_id=product.id,
+            supplier_contact_id=contact.id,
+            contact_attempt_id=contact.id,
+            channel=ContactType.EMAIL,
+            subject="Re: request",
+            body="Please clarify which delivery terms you need.",
+            from_address=contact.contact_value,
+            to_address="agent@example.test",
+        )
+        model = SequenceModelProvider([{"text": ""}, {"text": ""}])
+
+        reply = generate_supplier_reply(model, product, [inbound], language="en", style="formal")
+
+        self.assertEqual([], SafeMessagePolicy.validate_follow_up(reply))
+        self.assertIn(product.title, reply)
+        self.assertIn(product.product_url, reply)
+
+    def test_generate_supplier_reply_respects_russian_selection_when_model_writes_english(self):
+        contact = SupplierContact.create(ContactType.EMAIL, "supplier@example.test")
+        product = Product(
+            title="E2E Servo Drive",
+            product_url="https://supplier.test/products/servo-drive",
+            contacts=[contact],
+        )
+        contact.product_id = product.id
+        inbound = ConversationMessage.create_inbound(
+            product_id=product.id,
+            supplier_contact_id=contact.id,
+            contact_attempt_id=contact.id,
+            channel=ContactType.EMAIL,
+            subject="Re: request",
+            body="Please clarify delivery terms.",
+            from_address=contact.contact_value,
+            to_address="agent@example.test",
+        )
+        model = SequenceModelProvider(
+            [
+                {"text": "Hello. Thank you for the update. Please share delivery terms."},
+                {"text": "Hello. Thank you for the update. Please share delivery terms."},
+            ]
+        )
+
+        reply = generate_supplier_reply(model, product, [inbound], language="ru", style="formal")
+
+        self.assertEqual([], SafeMessagePolicy.validate_follow_up(reply))
+        self.assertIn("Здравствуйте", reply)
+        self.assertIn(product.title, reply)
 
     def test_follow_up_policy_allows_contextual_employee_reply_without_initial_topics(self):
         reply = "Здравствуйте. Я представляю отдел закупок нашей компании и уточняю условия по указанному товару."
@@ -433,7 +515,7 @@ class AgentRuntimeContractTest(unittest.TestCase):
         self.assertEqual(2, len(model.prompts))
         self.assertIn("reply repeats initial outreach template", model.prompts[1])
 
-    def test_generate_supplier_reply_fails_when_model_correction_is_unusable(self):
+    def test_generate_supplier_reply_falls_back_when_model_correction_is_unusable(self):
         contact = SupplierContact.create(ContactType.EMAIL, "supplier@example.test")
         product = Product(
             title="E2E Servo Drive",
@@ -453,10 +535,11 @@ class AgentRuntimeContractTest(unittest.TestCase):
         )
         model = SequenceModelProvider([{"text": ""}, {"text": "ok"}])
 
-        with self.assertRaises(RuntimeError):
-            generate_supplier_reply(model, product, [inbound], language="en", style="formal")
+        reply = generate_supplier_reply(model, product, [inbound], language="en", style="formal")
 
         self.assertEqual(2, len(model.prompts))
+        self.assertEqual([], SafeMessagePolicy.validate_follow_up(reply))
+        self.assertIn(product.title, reply)
 
     def test_supplier_message_supports_language_and_style(self):
         model = SequenceModelProvider(

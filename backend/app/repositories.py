@@ -3,7 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from .domain import AgentTask, ContactAttempt, ConversationMessage, Product, SearchRequest, SupplierContact
+from .domain import AgentTask, ContactAttempt, ContractDraft, ConversationMessage, Product, SearchRequest, SupplierContact
+
+
+@dataclass
+class InMemoryContractsRepository:
+    contract_drafts: dict[UUID, ContractDraft] = field(default_factory=dict)
+
+    def add_contract_draft(self, draft: ContractDraft) -> ContractDraft:
+        self.contract_drafts[draft.id] = draft
+        return draft
+
+    def get_contract_draft(self, draft_id: UUID) -> ContractDraft | None:
+        return self.contract_drafts.get(draft_id)
+
+    def list_contract_drafts_for_product(self, product_id: UUID) -> list[ContractDraft]:
+        return sorted(
+            (draft for draft in self.contract_drafts.values() if draft.product_id == product_id),
+            key=lambda draft: draft.created_at,
+            reverse=True,
+        )
 
 
 @dataclass
@@ -14,6 +33,7 @@ class InMemoryRepository:
     supplier_contacts: dict[UUID, SupplierContact] = field(default_factory=dict)
     contact_attempts: dict[UUID, ContactAttempt] = field(default_factory=dict)
     conversation_messages: dict[UUID, ConversationMessage] = field(default_factory=dict)
+    contracts: InMemoryContractsRepository = field(default_factory=InMemoryContractsRepository)
 
     def add_search_request(self, request: SearchRequest) -> SearchRequest:
         self.search_requests[request.id] = request

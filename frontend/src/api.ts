@@ -1,4 +1,4 @@
-import type { GmailSyncOptions, InboundMessagePayload, ProductDetail, SearchRequestItem, SupplierMessagePreferences } from "./types";
+import type { ContractDraft, GmailSyncOptions, InboundMessagePayload, InternalAssistantMessage, ProductCatalogResponse, ProductDetail, SearchRequestItem, SupplierMessagePreferences } from "./types";
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
 const browserApiBaseUrl = `${window.location.protocol}//${window.location.hostname}:8000/api`;
@@ -35,7 +35,7 @@ export function createSearchRequest(queryText: string, maxResults: number) {
 }
 
 export function listProducts(searchRequestId: string) {
-  return request<{ items: ProductDetail[]; total: number }>(`/search-requests/${searchRequestId}/products`);
+  return request<ProductCatalogResponse>(`/search-requests/${searchRequestId}/products`);
 }
 
 export function getProduct(productId: string) {
@@ -73,4 +73,39 @@ export function syncGmailInbound(options: GmailSyncOptions = {}) {
     method: "POST",
     body: JSON.stringify(options),
   });
+}
+
+export function askProductAssistant(productId: string, message: string) {
+  return request<{ reply: string; messages: InternalAssistantMessage[] }>(`/products/${productId}/assistant-chat`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}
+
+export function listContractDrafts(productId: string) {
+  return request<{ items: ContractDraft[] }>(`/products/${productId}/contracts`);
+}
+
+export function createContractDraft(productId: string) {
+  return request<ContractDraft>(`/products/${productId}/contracts`, {
+    method: "POST",
+  });
+}
+
+export async function downloadContractDraft(contractId: string) {
+  const response = await fetch(`${API_BASE_URL}/contracts/${contractId}/download`);
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({ detail: "Не удалось скачать договор" }));
+    throw new Error(detail.detail ?? "Не удалось скачать договор");
+  }
+  return response.blob();
+}
+
+export async function downloadProductExport(productId: string) {
+  const response = await fetch(`${API_BASE_URL}/products/${productId}/export.xlsx`);
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({ detail: "РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Excel" }));
+    throw new Error(detail.detail ?? "РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Excel");
+  }
+  return response.blob();
 }

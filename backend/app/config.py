@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
+import sys
 from typing import Iterable
 
 
@@ -76,12 +78,16 @@ class Settings:
     test_supplier_telegram: str
     auto_process_search_tasks: bool = False
     auto_process_supplier_contact_tasks: bool = False
+    auto_process_contract_tasks: bool = False
     auto_sync_gmail_inbound: bool = True
     gmail_inbound_sync_interval_seconds: float = 30.0
     allow_products_without_contacts: bool = False
+    search_contact_enrichment_pages: int = 1
+    contracts_database_url: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
+        _load_local_env_file()
         return cls(
             app_env=os.getenv("APP_ENV", "local"),
             webui_base_url=os.getenv("WEBUI_BASE_URL", "http://localhost:5173"),
@@ -89,6 +95,10 @@ class Settings:
             database_url=os.getenv(
                 "DATABASE_URL",
                 "postgresql+psycopg://product_sourcing:change-me@localhost:5432/product_sourcing",
+            ),
+            contracts_database_url=os.getenv(
+                "CONTRACTS_DATABASE_URL",
+                "postgresql+psycopg://product_sourcing:change-me@localhost:5432/product_sourcing_contracts",
             ),
             redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
             model_provider=os.getenv("MODEL_PROVIDER", ""),
@@ -114,6 +124,7 @@ class Settings:
             web_search_result_limit=int(os.getenv("WEB_SEARCH_RESULT_LIMIT", "20")),
             ai_search_query_count=int(os.getenv("AI_SEARCH_QUERY_COUNT", "3")),
             ai_search_candidate_limit=int(os.getenv("AI_SEARCH_CANDIDATE_LIMIT", "5")),
+            search_contact_enrichment_pages=int(os.getenv("SEARCH_CONTACT_ENRICHMENT_PAGES", "1")),
             email_connector_provider=os.getenv("EMAIL_CONNECTOR_PROVIDER", ""),
             email_smtp_host=os.getenv("EMAIL_SMTP_HOST", ""),
             email_smtp_port=int(os.getenv("EMAIL_SMTP_PORT", "587")),
@@ -139,6 +150,7 @@ class Settings:
             test_supplier_telegram=os.getenv("TEST_SUPPLIER_TELEGRAM", "@supplier_e2e_test"),
             auto_process_search_tasks=_env_bool("AUTO_PROCESS_SEARCH_TASKS", False),
             auto_process_supplier_contact_tasks=_env_bool("AUTO_PROCESS_SUPPLIER_CONTACT_TASKS", False),
+            auto_process_contract_tasks=_env_bool("AUTO_PROCESS_CONTRACT_TASKS", False),
             auto_sync_gmail_inbound=_env_bool("AUTO_SYNC_GMAIL_INBOUND", True),
             gmail_inbound_sync_interval_seconds=float(os.getenv("GMAIL_INBOUND_SYNC_INTERVAL_SECONDS", "30")),
             allow_products_without_contacts=_env_bool("ALLOW_PRODUCTS_WITHOUT_CONTACTS", False),
@@ -166,3 +178,24 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _load_local_env_file(path: str | Path | None = None) -> None:
+    if (
+        path is None
+        and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules)
+        and os.getenv("LOAD_DOTENV_IN_TESTS", "").lower() not in {"1", "true", "yes", "on"}
+    ):
+        return
+    env_path = Path(path) if path is not None else Path(os.getcwd()) / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        normalized_key = key.strip()
+        if not normalized_key or normalized_key in os.environ:
+            continue
+        os.environ[normalized_key] = value.strip().strip('"').strip("'")

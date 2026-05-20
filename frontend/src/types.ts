@@ -1,5 +1,6 @@
 export type SearchRequestStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ContactAttemptStatus = "queued" | "running" | "sent" | "responded" | "failed" | "cancelled";
+export type ContractDraftStatus = "queued" | "running" | "ready" | "failed" | "cancelled";
 export type SupplierMessageLanguage = "ru" | "en" | "zh";
 export type SupplierMessageStyle = "concise" | "formal" | "friendly";
 
@@ -41,6 +42,26 @@ export interface ProductCard {
   images: string[];
   attributes: Record<string, string>;
   contacts?: SupplierContact[];
+  supplierComparison?: SupplierComparison;
+  duplicateReason?: string;
+  isDuplicate?: boolean;
+}
+
+export interface SupplierComparison {
+  overallRating: number;
+  ratingLabel: "excellent" | "strong" | "average" | "weak";
+  priceRank?: number | null;
+  priceDeltaPercent?: number | null;
+  comparedProductsCount: number;
+  metrics: {
+      priceScore: number;
+      contactabilityScore: number;
+      contactQualityScore: number;
+      responseScore: number;
+      communicationScore: number;
+      dataCompletenessScore: number;
+      sourceTraceabilityScore: number;
+  };
 }
 
 export interface SupplierContact {
@@ -48,6 +69,8 @@ export interface SupplierContact {
   contactType: "email" | "telegram";
   contactValue: string;
   isPrimary: boolean;
+  isPreferred?: boolean;
+  qualityScore?: number;
 }
 
 export interface ContactAttempt {
@@ -82,6 +105,33 @@ export interface ProductDetail extends ProductCard {
   contacts: SupplierContact[];
   contactAttempts: ContactAttempt[];
   conversationMessages: ConversationMessage[];
+  assistantMessages: InternalAssistantMessage[];
+}
+
+export interface ProductCatalogResponse {
+  items: ProductCard[];
+  duplicates: ProductCard[];
+  total: number;
+  duplicatesTotal: number;
+}
+
+export interface ContractDraft {
+  id: string;
+  productId: string;
+  supplierContactId: string;
+  agentTaskId?: string | null;
+  supplierName: string;
+  status: ContractDraftStatus;
+  title: string;
+  extractedData: Record<string, unknown>;
+  missingFields: string[];
+  fileName: string;
+  contentType: string;
+  errorMessage?: string | null;
+  draftText?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
 }
 
 export interface InboundMessagePayload {
@@ -94,4 +144,11 @@ export interface InboundMessagePayload {
   toAddress?: string | null;
   externalMessageId?: string | null;
   providerTimestamp?: string | null;
+}
+
+export interface InternalAssistantMessage {
+  id: string;
+  role: "user" | "assistant";
+  body: string;
+  createdAt?: string;
 }

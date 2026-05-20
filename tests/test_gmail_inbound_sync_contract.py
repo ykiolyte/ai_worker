@@ -74,6 +74,24 @@ class CompanyDetailsModelProvider:
         }
 
 
+class SupplierAnalysisModelProvider(ModelProvider):
+    def complete(self, prompt: str, tools=None):
+        if "Analyze the latest supplier reply" in prompt:
+            return {
+                "summary": "Supplier provided concrete offer.",
+                "price": "98",
+                "currency": "USD",
+                "moq": "20",
+                "leadTime": "7 days",
+                "availability": "in stock",
+                "paymentTerms": "T/T",
+                "deliveryTerms": "FOB",
+                "nextStep": "review offer",
+                "communicationScore": "91",
+            }
+        return super().complete(prompt, tools)
+
+
 class RaisingEmailConnector:
     from_address = "agent@example.test"
     password = ""
@@ -137,6 +155,31 @@ class GmailInboundSyncContractTest(unittest.TestCase):
         self.assertEqual("<gmail-inbound-1@example.test>", messages[0].external_message_id)
         self.assertEqual("2026-05-02T15:55:53+00:00", messages[0].provider_timestamp.isoformat())
         self.assertIn("MOQ is 10", messages[0].body)
+
+    def test_sync_saves_ai_supplier_reply_analysis_on_product(self):
+        product, _, _ = self.create_product_with_email_contact()
+        connector = GmailInboundConnector(
+            [
+                InboundEmailMessage(
+                    external_id="<gmail-analysis@example.test>",
+                    subject="Re: Product request",
+                    body="Price 98 USD, MOQ 20, in stock, lead time 7 days.",
+                    from_address="supplier@example.test",
+                    to_address="agent@example.test",
+                )
+            ]
+        )
+
+        result = sync_gmail_inbound_messages(
+            self.repo,
+            connector,
+            runtime=runtime_with_email(RecordingEmailConnector(), SupplierAnalysisModelProvider()),
+        )
+
+        self.assertEqual({"messagesCreated": 1, "messagesSkipped": 0, "autoRepliesSent": 1}, result)
+        self.assertEqual("91", product.attributes["communicationScore"])
+        self.assertEqual("20", product.attributes["supplierMoq"])
+        self.assertEqual("review offer", product.attributes["supplierReplyNextStep"])
 
     def test_sync_deduplicates_by_external_message_id(self):
         product, _, _ = self.create_product_with_email_contact()
@@ -269,7 +312,7 @@ class GmailInboundSyncContractTest(unittest.TestCase):
         self.assertIn("AlphaLogisticService LLC", email.calls[0][2])
         self.assertNotIn("confirmed order", email.calls[0][2].lower())
         self.assertNotIn("we will pay", email.calls[0][2].lower())
-        self.assertEqual(2, len(model.prompts))
+        self.assertEqual(3, len(model.prompts))
 
     def test_sync_marks_auto_reply_attempt_failed_when_connector_raises(self):
         product, _, _ = self.create_product_with_email_contact()

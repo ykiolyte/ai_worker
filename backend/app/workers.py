@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 import threading
 import time
 from uuid import UUID
 from email.utils import parseaddr
+from urllib.parse import urlparse
 
 from .agent import (
     AgentRuntime,
     ConnectorResult,
     SafeMessagePolicy,
+    analyze_supplier_reply,
+    generate_contract_draft,
     generate_supplier_message,
     generate_supplier_reply,
     validate_agent_product_output,
@@ -19,6 +23,7 @@ from .domain import (
     ContactAttempt,
     ContactAttemptStatus,
     ContactType,
+    ContractDraftStatus,
     ConversationMessage,
     Product,
     SearchRequestStatus,
@@ -63,7 +68,14 @@ def process_product_search(
             connector_result.payload or {},
             allow_products_without_contacts=allow_products_without_contacts,
         )
-        existing_urls = {product.product_url for product in repo.list_products_for_request(request.id)}
+        existing_products = repo.list_products_for_request(request.id)
+        existing_urls = {product.product_url for product in existing_products}
+        existing_supplier_keys = {
+            key
+            for product in existing_products
+            for key in [_supplier_dedupe_key(product)]
+            if key
+        }
         duplicate_errors = []
         limit_errors = []
         created_count = 0
@@ -87,7 +99,19 @@ def process_product_search(
                     }
                 )
                 continue
+            supplier_key = _supplier_dedupe_key(product)
+            if supplier_key and supplier_key in existing_supplier_keys:
+                duplicate_errors.append(
+                    {
+                        "index": None,
+                        "errors": ["duplicate supplier for search request"],
+                        "raw": product.raw_agent_payload,
+                    }
+                )
+                continue
             existing_urls.add(product.product_url)
+            if supplier_key:
+                existing_supplier_keys.add(supplier_key)
             repo.add_product(product)
             created_count += 1
         demo_created = _ensure_demo_product(repo, request.id, existing_urls)
@@ -131,8 +155,32 @@ def _task_max_results(payload: dict) -> int:
     return max(1, min(value, 50))
 
 
+def _supplier_dedupe_key(product: Product) -> str:
+    if product.attributes.get("demo") == "true":
+        return f"demo:{product.product_url}"
+    domain = (product.source_domain or urlparse(product.product_url).hostname or "").lower().strip()
+    if domain:
+        return f"domain:{_normalize_supplier_domain(domain)}"
+    for contact in product.contacts:
+        if contact.contact_type == ContactType.EMAIL:
+            _local, _sep, contact_domain = contact.contact_value.lower().partition("@")
+            if contact_domain:
+                return f"domain:{_normalize_supplier_domain(contact_domain)}"
+        if contact.contact_type == ContactType.TELEGRAM:
+            return f"telegram:{contact.contact_value.lower().removeprefix('https://t.me/').removeprefix('@')}"
+    supplier_name = (product.supplier_name or "").strip().lower()
+    if supplier_name:
+        return f"name:{supplier_name}"
+    return ""
+
+
+def _normalize_supplier_domain(domain: str) -> str:
+    normalized = domain.lower().strip().removeprefix("www.")
+    return normalized.split(":", 1)[0]
+
+
 def _ensure_demo_product(repo: InMemoryRepository, search_request_id: UUID, existing_urls: set[str]) -> bool:
-    product_url = f"https://demo.local/product-sourcing-demo/{search_request_id}"
+    product_url = f"http://localhost:5173/demo/product-sourcing-demo/{search_request_id}"
     if product_url in existing_urls:
         return False
     if any(product.product_url == product_url for product in repo.list_products_for_request(search_request_id)):
@@ -191,7 +239,7 @@ def process_supplier_contact(repo: InMemoryRepository, runtime: AgentRuntime, ta
                 runtime.model_provider,
                 product,
                 history,
-                language=str(task.input_payload.get("language") or "ru"),
+                language=_task_message_language(task.input_payload, history),
                 style=str(task.input_payload.get("style") or "formal"),
             )
         else:
@@ -199,7 +247,7 @@ def process_supplier_contact(repo: InMemoryRepository, runtime: AgentRuntime, ta
                 runtime.model_provider,
                 product.title,
                 product.product_url,
-                language=str(task.input_payload.get("language") or "ru"),
+                language=str(task.input_payload.get("language") or "en"),
                 style=str(task.input_payload.get("style") or "formal"),
             )
         if task.input_payload.get("conversationMode") == "reply":
@@ -271,6 +319,40 @@ def process_supplier_contact(repo: InMemoryRepository, runtime: AgentRuntime, ta
             task.transition_to(AgentTaskStatus.FAILED)
 
 
+def process_contract_draft(repo: InMemoryRepository, runtime: AgentRuntime, task_id: UUID) -> None:
+    task = repo.get_agent_task(task_id)
+    if task is None:
+        raise ValueError(f"agent task not found: {task_id}")
+    draft = repo.contracts.get_contract_draft(UUID(task.input_payload["contractDraftId"]))
+    if draft is None:
+        _fail_task_only(task, "contract draft not found")
+        return
+    product = repo.get_product(draft.product_id)
+    if product is None:
+        draft.mark_failed("product not found")
+        _fail_task_only(task, "product not found")
+        return
+    try:
+        task.transition_to(AgentTaskStatus.RUNNING)
+        draft.transition_to(ContractDraftStatus.RUNNING)
+        output = generate_contract_draft(
+            runtime.model_provider,
+            product,
+            repo.list_conversation_messages_for_product(product.id),
+        )
+        draft.mark_ready(output["draftText"], output["extractedData"], title=output["title"])
+        task.output_payload = {"contractDraftId": str(draft.id), "status": draft.status.value}
+        task.transition_to(AgentTaskStatus.COMPLETED)
+    except Exception as exc:
+        message = str(exc)
+        draft.mark_failed(message)
+        task.error_message = message
+        if task.status == AgentTaskStatus.QUEUED:
+            task.transition_to(AgentTaskStatus.RUNNING)
+        if task.status == AgentTaskStatus.RUNNING:
+            task.transition_to(AgentTaskStatus.FAILED)
+
+
 def _redact_connector_error(message: str, connector) -> str:
     redacted = message
     for secret in _connector_secret_values(connector):
@@ -287,6 +369,16 @@ def _connector_secret_values(connector) -> list[str]:
         if isinstance(value, str) and value:
             values.append(value)
     return values
+
+
+def _task_message_language(payload: dict, history: list[ConversationMessage]) -> str:
+    explicit = str(payload.get("language") or "").strip().lower()
+    if explicit:
+        return explicit
+    for message in reversed(history):
+        if message.direction.value == "inbound" and re.search(r"[А-Яа-яЁё]", message.body or ""):
+            return "ru"
+    return "en"
 
 
 def sync_gmail_inbound_messages(
@@ -366,6 +458,7 @@ def _sync_gmail_inbound_messages_unlocked(
                 provider_timestamp=getattr(inbound, "provider_timestamp", None),
             )
             repo.add_conversation_message(message)
+            _apply_supplier_reply_analysis(repo, runtime, product, message)
             existing_external_ids.add(inbound.external_id)
             if attempt.status == ContactAttemptStatus.SENT:
                 attempt.transition_to(ContactAttemptStatus.RESPONDED)
@@ -376,6 +469,32 @@ def _sync_gmail_inbound_messages_unlocked(
                 if _send_auto_agent_reply(repo, runtime, product, contact):
                     auto_replies_sent += 1
     return {"messagesCreated": created, "messagesSkipped": skipped, "autoRepliesSent": auto_replies_sent}
+
+
+def _apply_supplier_reply_analysis(
+    repo: InMemoryRepository,
+    runtime: AgentRuntime | None,
+    product: Product,
+    message: ConversationMessage,
+) -> None:
+    analysis = analyze_supplier_reply(runtime.model_provider if runtime else None, product, message)
+    product.attributes["supplierReplyAnalysis"] = analysis
+    product.attributes["supplierReplySummary"] = analysis.get("summary", "")
+    product.attributes["supplierReplyNextStep"] = analysis.get("nextStep", "")
+    product.attributes["communicationScore"] = analysis.get("communicationScore", "45")
+    for product_field, analysis_key in (
+        ("price", "price"),
+        ("currency", "currency"),
+        ("supplierMoq", "moq"),
+        ("supplierLeadTime", "leadTime"),
+        ("supplierAvailability", "availability"),
+        ("supplierPaymentTerms", "paymentTerms"),
+        ("supplierDeliveryTerms", "deliveryTerms"),
+        ("supplierRiskFlags", "riskFlags"),
+    ):
+        value = str(analysis.get(analysis_key) or "").strip()
+        if value:
+            product.attributes[product_field] = value
 
 
 def run_gmail_inbound_sync_loop(

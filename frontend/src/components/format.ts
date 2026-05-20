@@ -12,6 +12,33 @@ export function formatPrice(price: string | null | undefined, currency: string |
   return currency ? `${price} ${currency}` : price;
 }
 
+export function ratingLabel(label: string | null | undefined) {
+  const labels: Record<string, string> = {
+    excellent: "Top supplier",
+    strong: "Strong supplier",
+    average: "Average supplier",
+    weak: "Weak supplier",
+  };
+  return label ? labels[label] ?? label : "Not rated";
+}
+
+export function formatPriceRank(rank: number | null | undefined, comparedCount: number | null | undefined) {
+  if (!rank || !comparedCount) {
+    return "No price rank";
+  }
+  return `Price rank #${rank} of ${comparedCount}`;
+}
+
+export function formatPriceDelta(delta: number | null | undefined) {
+  if (delta === undefined || delta === null) {
+    return "Price delta unknown";
+  }
+  if (delta <= 0) {
+    return "Best price";
+  }
+  return `+${delta}% vs best price`;
+}
+
 export function formatDuration(seconds: number | null | undefined) {
   if (seconds === undefined || seconds === null) {
     return "РµС‰Рµ РЅРµ Р·Р°РІРµСЂС€РµРЅ";

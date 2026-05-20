@@ -93,6 +93,8 @@ class ProductSearchWorkerContractTest(unittest.TestCase):
         self.assertEqual(2, len(products))
         demo = next(product for product in products if "Демо" in product.title)
         contacts = self.repo.list_contacts_for_product(demo.id)
+        self.assertNotIn("demo.local", demo.product_url)
+        self.assertTrue(demo.product_url.startswith("http://localhost:5173/"))
         self.assertEqual(2, len(self.repo.supplier_contacts))
         self.assertEqual(ContactType.EMAIL, contacts[0].contact_type)
         self.assertEqual("ezmmr4us@gmail.com", contacts[0].contact_value)
@@ -208,6 +210,44 @@ class ProductSearchWorkerContractTest(unittest.TestCase):
         self.assertEqual(1, task.output_payload["demoProductsCreated"])
         self.assertEqual(1, task.output_payload["productsSkipped"])
         self.assertEqual(["maxResults limit reached"], task.output_payload["errors"][0]["errors"])
+
+    def test_product_search_deduplicates_supplier_domain(self):
+        request, task = self.create_search_task(max_results=5)
+        browser = BrowserConnector(
+            ConnectorResult(
+                success=True,
+                payload={
+                    "products": [
+                        {
+                            "title": "Supplier A Product One",
+                            "productUrl": "https://supplier-a.test/products/one",
+                            "contacts": [{"type": "email", "value": "sales@supplier-a.test"}],
+                        },
+                        {
+                            "title": "Supplier A Product Two",
+                            "productUrl": "https://supplier-a.test/products/two",
+                            "contacts": [{"type": "email", "value": "info@supplier-a.test"}],
+                        },
+                        {
+                            "title": "Supplier B Product",
+                            "productUrl": "https://supplier-b.test/products/one",
+                            "contacts": [{"type": "email", "value": "sales@supplier-b.test"}],
+                        },
+                    ]
+                },
+            )
+        )
+
+        process_product_search(self.repo, runtime_with_browser(browser), task.id)
+
+        products = [
+            product for product in self.repo.list_products_for_request(request.id)
+            if product.attributes.get("demo") != "true"
+        ]
+        self.assertEqual(["supplier-a.test", "supplier-b.test"], [product.source_domain for product in products])
+        self.assertEqual(2, task.output_payload["productsCreated"])
+        self.assertEqual(1, task.output_payload["productsSkipped"])
+        self.assertEqual(["duplicate supplier for search request"], task.output_payload["errors"][0]["errors"])
 
     def test_product_search_does_not_duplicate_demo_card_on_retry(self):
         request, task = self.create_search_task()

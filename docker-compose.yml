@@ -15,6 +15,23 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  contracts-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: product_sourcing_contracts
+      POSTGRES_USER: product_sourcing
+      POSTGRES_PASSWORD: change-me
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U product_sourcing -d product_sourcing_contracts"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - contracts_postgres_data:/var/lib/postgresql/data
+      - ./scripts/contracts_schema.sql:/docker-entrypoint-initdb.d/001_contracts_schema.sql:ro
+
   redis:
     image: redis:7
     ports:
@@ -33,6 +50,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@postgres:5432/product_sourcing
+      CONTRACTS_DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@contracts-postgres:5432/product_sourcing_contracts
       REDIS_URL: redis://redis:6379/0
       API_BASE_URL: http://localhost:8000/api
       WEBUI_BASE_URL: http://localhost:5173
@@ -44,6 +62,7 @@ services:
       WEB_SEARCH_PROVIDER: multi
       WEB_SEARCH_ENGINES: duckduckgo:https://duckduckgo.com/html/,searxng:http://searxng:8080/search
       WEB_SEARCH_URL: http://searxng:8080/search
+      SEARCH_CONTACT_ENRICHMENT_PAGES: ${SEARCH_CONTACT_ENRICHMENT_PAGES:-1}
       EMAIL_CONNECTOR_PROVIDER: smtp
       EMAIL_SMTP_HOST: ${DOCKER_EMAIL_SMTP_HOST:-${EMAIL_SMTP_HOST:-mailpit}}
       EMAIL_SMTP_PORT: ${DOCKER_EMAIL_SMTP_PORT:-${EMAIL_SMTP_PORT:-1025}}
@@ -57,6 +76,8 @@ services:
       - "8000:8000"
     depends_on:
       postgres:
+        condition: service_healthy
+      contracts-postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -78,6 +99,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@postgres:5432/product_sourcing
+      CONTRACTS_DATABASE_URL: postgresql+psycopg://product_sourcing:change-me@contracts-postgres:5432/product_sourcing_contracts
       REDIS_URL: redis://redis:6379/0
       BROWSER_PROVIDER: playwright_mcp
       BROWSER_MCP_SERVICE_NAME: browser-mcp
@@ -87,6 +109,7 @@ services:
       WEB_SEARCH_PROVIDER: multi
       WEB_SEARCH_ENGINES: duckduckgo:https://duckduckgo.com/html/,searxng:http://searxng:8080/search
       WEB_SEARCH_URL: http://searxng:8080/search
+      SEARCH_CONTACT_ENRICHMENT_PAGES: ${SEARCH_CONTACT_ENRICHMENT_PAGES:-1}
       EMAIL_CONNECTOR_PROVIDER: smtp
       EMAIL_SMTP_HOST: ${DOCKER_EMAIL_SMTP_HOST:-${EMAIL_SMTP_HOST:-mailpit}}
       EMAIL_SMTP_PORT: ${DOCKER_EMAIL_SMTP_PORT:-${EMAIL_SMTP_PORT:-1025}}
@@ -98,6 +121,8 @@ services:
       TEST_SUPPLIER_SITE_URL: ${DOCKER_TEST_SUPPLIER_SITE_URL:-http://supplier-site}
     depends_on:
       postgres:
+        condition: service_healthy
+      contracts-postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -153,6 +178,10 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
     ports:
       - "11434:11434"
     volumes:
@@ -166,3 +195,4 @@ services:
 
 volumes:
   postgres_data:
+  contracts_postgres_data:

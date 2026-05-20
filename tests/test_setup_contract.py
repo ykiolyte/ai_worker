@@ -66,6 +66,7 @@ class SetupContractTest(unittest.TestCase):
             "WEB_SEARCH_RESULT_LIMIT",
             "AI_SEARCH_QUERY_COUNT",
             "AI_SEARCH_CANDIDATE_LIMIT",
+            "SEARCH_CONTACT_ENRICHMENT_PAGES",
             "TEST_SUPPLIER_SITE_URL",
             "TEST_SUPPLIER_EMAIL",
             "TEST_SUPPLIER_TELEGRAM",

@@ -111,12 +111,42 @@ EXTRACT_PRODUCT_CODE = """
       .filter(Boolean)
       .map((value) => new URL(String(value), document.baseURI).href);
     const emailValues = new Set();
+    const normalizeEmailCandidate = (value) => String(value || '')
+      .replace(/\\s*(?:\\(|\\[|\\{)?\\s*at\\s*(?:\\)|\\]|\\})?\\s*/ig, '@')
+      .replace(/\\s*(?:\\(|\\[|\\{)?\\s*dot\\s*(?:\\)|\\]|\\})?\\s*/ig, '.')
+      .replace(/\\s+/g, '')
+      .trim();
+    const addEmailCandidate = (value) => {
+      const normalized = normalizeEmailCandidate(value);
+      if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$/i.test(normalized)) {
+        emailValues.add(normalized);
+      }
+    };
+    const decodeCfEmail = (encoded) => {
+      try {
+        const key = parseInt(encoded.slice(0, 2), 16);
+        let email = '';
+        for (let index = 2; index < encoded.length; index += 2) {
+          email += String.fromCharCode(parseInt(encoded.slice(index, index + 2), 16) ^ key);
+        }
+        return email;
+      } catch (_ignored) {
+        return '';
+      }
+    };
     for (const link of Array.from(document.querySelectorAll('a[href^="mailto:"]'))) {
-      emailValues.add(link.getAttribute('href').replace(/^mailto:/i, '').split('?')[0].trim());
+      addEmailCandidate(link.getAttribute('href').replace(/^mailto:/i, '').split('?')[0].trim());
     }
     const bodyText = document.body ? document.body.innerText : '';
     for (const match of bodyText.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi)) {
-      emailValues.add(match[0]);
+      addEmailCandidate(match[0]);
+    }
+    const fullText = [bodyText, document.documentElement ? document.documentElement.textContent : ''].join('\\n');
+    for (const match of fullText.matchAll(/[A-Z0-9._%+-]+\\s*(?:\\(|\\[|\\{)?\\s*at\\s*(?:\\)|\\]|\\})?\\s*[A-Z0-9.-]+\\s*(?:\\(|\\[|\\{)?\\s*dot\\s*(?:\\)|\\]|\\})?\\s*[A-Z]{2,}/gi)) {
+      addEmailCandidate(match[0]);
+    }
+    for (const node of Array.from(document.querySelectorAll('[data-cfemail]'))) {
+      addEmailCandidate(decodeCfEmail(node.getAttribute('data-cfemail') || ''));
     }
     const telegramValues = new Set();
     for (const link of Array.from(document.querySelectorAll('a[href*="t.me/"], a[href*="telegram.me/"]'))) {
@@ -131,6 +161,24 @@ EXTRACT_PRODUCT_CODE = """
     const contactType = pairs['contact type'] || null;
     const contactValue = pairs.contact || null;
     if (contactType && contactValue) contacts.unshift({ type: contactType, value: contactValue });
+    const contactLinkTerms = /(contact|contacts|contact-us|sales|support|customer-service|dealer|dealers|distributor|distributors|where-to-buy|about|impressum)/i;
+    const contactLinks = [];
+    const seenContactLinks = new Set();
+    for (const link of Array.from(document.querySelectorAll('a[href]'))) {
+      const label = [
+        link.textContent || '',
+        link.getAttribute('href') || '',
+        link.getAttribute('aria-label') || '',
+        link.getAttribute('title') || ''
+      ].join(' ');
+      if (!contactLinkTerms.test(label)) continue;
+      const href = new URL(link.getAttribute('href'), document.baseURI).href.split('#')[0];
+      if (!seenContactLinks.has(href)) {
+        seenContactLinks.add(href);
+        contactLinks.push(href);
+      }
+      if (contactLinks.length >= 12) break;
+    }
     const image = document.querySelector('article img, img');
     const priceText = first(
       offers.price,
@@ -169,7 +217,8 @@ EXTRACT_PRODUCT_CODE = """
       attributes: Object.assign({}, attributes, {
         sku: first(productLd.sku, pairs.sku),
         brand: first(brand, pairs.brand),
-        availability: first(offers.availability, pairs.availability)
+        availability: first(offers.availability, pairs.availability),
+        contactLinks: contactLinks.length ? JSON.stringify(contactLinks) : null
       })
     };
 }
@@ -581,6 +630,7 @@ class PlaywrightMcpBrowserConnector:
     research_mode: str = "site"
     allow_public_internet: bool = False
     search_url_template: str = "https://www.adafruit.com/search?q={query}"
+    contact_enrichment_pages: int = 1
 
     def research(self, query_text: str, max_results: int | None = None) -> ConnectorResult:
         client = self.mcp_client_factory()
@@ -599,8 +649,12 @@ class PlaywrightMcpBrowserConnector:
         products: list[dict[str, Any]] = []
         candidate_errors: list[dict[str, str]] = []
         candidate_limit = _research_candidate_limit(self.max_pages, max_results)
+        candidates_visited = 0
         for link in candidate_links[:candidate_limit]:
+            if _has_enough_valid_products(products, max_results):
+                break
             product_url = link["url"]
+            candidates_visited += 1
             try:
                 self.ensure_allowed_url(product_url)
                 products.extend(self._extract_products_from_page(product_url))
@@ -615,7 +669,7 @@ class PlaywrightMcpBrowserConnector:
                     "provider": "playwright_mcp",
                     "mode": mode,
                     "startUrl": start_url,
-                    "candidatesVisited": len(candidate_links[:candidate_limit]),
+                    "candidatesVisited": candidates_visited,
                     "candidateErrors": candidate_errors,
                 },
             },
@@ -625,15 +679,26 @@ class PlaywrightMcpBrowserConnector:
         products: list[dict[str, Any]] = []
         candidate_errors: list[dict[str, str]] = []
         candidate_limit = _research_candidate_limit(self.max_pages, max_results)
+        candidates_visited = 0
         for link in links[:candidate_limit]:
+            if _has_enough_valid_products(products, max_results):
+                break
             product_url = link["url"]
+            candidates_visited += 1
             try:
                 self.ensure_allowed_url(product_url)
-                products.extend(self._extract_products_from_page(product_url))
+                extracted = self._extract_products_from_page(product_url)
+                if not extracted:
+                    products.append(_fallback_product_from_link(link))
+                    continue
+                for product in extracted:
+                    self._enrich_product_contacts(product, link)
+                    _annotate_product_with_discovery(product, link)
+                    products.append(product)
             except Exception as exc:
                 candidate_errors.append({"url": product_url, "error": str(exc)})
                 products.append(_fallback_product_from_link(link))
-        return {"products": products, "candidateErrors": candidate_errors}
+        return {"products": products, "candidateErrors": candidate_errors, "candidatesVisited": candidates_visited}
 
     def ensure_allowed_url(self, url: str) -> None:
         parsed = urlparse(url)
@@ -718,6 +783,33 @@ class PlaywrightMcpBrowserConnector:
         finally:
             self._close_client(client)
 
+    def _enrich_product_contacts(self, product: dict[str, Any], link: dict[str, str]) -> None:
+        existing_contacts = product.get("contacts")
+        if isinstance(existing_contacts, list) and existing_contacts:
+            return
+        product_url = str(product.get("productUrl") or link.get("url") or "").strip()
+        enrichment_pages: list[str] = []
+        contacts: list[dict[str, str]] = []
+        if self.contact_enrichment_pages <= 0:
+            return
+        for page_url in _supplier_contact_candidate_pages(product_url, product)[: self.contact_enrichment_pages]:
+            try:
+                self.ensure_allowed_url(page_url)
+                for payload in self._extract_products_from_page(page_url):
+                    page_contacts = payload.get("contacts")
+                    if isinstance(page_contacts, list):
+                        contacts = _merge_contacts(contacts, page_contacts)
+                if contacts:
+                    enrichment_pages.append(page_url)
+                    break
+            except Exception:
+                continue
+        if contacts:
+            product["contacts"] = _merge_contacts(product.get("contacts") if isinstance(product.get("contacts"), list) else [], contacts)
+            attributes = product.setdefault("attributes", {})
+            if isinstance(attributes, dict):
+                attributes["enrichmentPages"] = ",".join(enrichment_pages)
+
     def _close_client(self, client: McpClient) -> None:
         try:
             self._call_tool(client, "browser_close", {})
@@ -751,7 +843,7 @@ class AiInternetProductSearchConnector:
             selected_links = self._select_candidates(query_text, search_results, candidate_limit)
             extraction = self.browser_connector.extract_products_from_links(
                 selected_links[:candidate_limit],
-                max_results=candidate_limit,
+                max_results=max_results,
             )
             return ConnectorResult(
                 success=True,
@@ -763,7 +855,7 @@ class AiInternetProductSearchConnector:
                         "model": self.model_provider.name,
                         "queries": queries,
                         "resultsCollected": len(search_results),
-                        "candidatesVisited": len(selected_links[:candidate_limit]),
+                        "candidatesVisited": extraction.get("candidatesVisited", len(selected_links[:candidate_limit])),
                         "candidateErrors": extraction["candidateErrors"],
                     },
                 },
@@ -789,6 +881,7 @@ class AiInternetProductSearchConnector:
         ]
         if not queries:
             queries = [query_text.strip()]
+        queries.extend(_b2b_supplier_query_variants(query_text))
         return _unique_strings(queries)[: self.query_count]
 
     def _collect_search_results(self, queries: list[str]) -> list[WebSearchResult]:
@@ -851,10 +944,28 @@ class AiInternetProductSearchConnector:
                 continue
             title = str(item.get("title") or allowed_by_url[url].title).strip()
             if title:
-                selected.append({"title": title, "url": url})
-        if selected:
-            return selected
-        return [{"title": result.title, "url": result.url} for result in results[:limit]]
+                selected.append(
+                    _search_result_candidate_link(
+                        allowed_by_url[url],
+                        query_text,
+                        reason=str(item.get("reason") or "").strip(),
+                        title_override=title,
+                    )
+                )
+        query_terms = _meaningful_query_terms(query_text)
+        ranked = sorted(
+            results,
+            key=lambda result: (-_score_search_result_candidate(result, query_terms), result.title.lower(), result.url),
+        )
+        selected_urls = {item["url"] for item in selected}
+        for result in ranked:
+            if len(selected) >= limit:
+                break
+            if result.url in selected_urls:
+                continue
+            selected.append(_search_result_candidate_link(result, query_text))
+            selected_urls.add(result.url)
+        return selected[:limit]
 
 
 @dataclass
@@ -1046,6 +1157,7 @@ def build_browser_connector(
         research_mode=settings.browser_research_mode,
         allow_public_internet=settings.browser_allow_public_internet,
         search_url_template=settings.internet_search_url_template,
+        contact_enrichment_pages=settings.search_contact_enrichment_pages,
     )
     if settings.browser_research_mode.strip().lower() != "ai_internet":
         return browser_connector
@@ -1468,12 +1580,271 @@ def _fallback_product_from_link(link: dict[str, str]) -> dict[str, Any]:
         "images": [],
         "attributes": {"extractionFallback": "search_result_link"},
     }
+    _annotate_product_with_discovery(payload, link)
     if price is not None:
         payload["price"] = price
     currency = _currency_from_text(link["title"])
     if currency:
         payload["currency"] = currency
     return payload
+
+
+def _base_search_query(query_text: str) -> str:
+    query_without_site = re.sub(r"site:https?://[^\s]+", "", query_text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", query_without_site).strip()
+
+
+def _b2b_supplier_query_variants(query_text: str) -> list[str]:
+    base = _base_search_query(query_text)
+    if not base:
+        return []
+    return [
+        f"{base} supplier",
+        f"{base} manufacturer",
+        f"{base} distributor",
+        f"{base} wholesale",
+        f"{base} moq",
+        f"{base} stock",
+        f"{base} contact",
+        f"{base} rfq",
+        f"{base} price list",
+        f"{base} authorized distributor",
+    ]
+
+
+def _search_result_candidate_link(
+    result: WebSearchResult,
+    query_text: str,
+    *,
+    reason: str = "",
+    title_override: str = "",
+) -> dict[str, str]:
+    title = title_override or result.title
+    supplier_type = _supplier_candidate_type(title, result.url, result.snippet)
+    source_confidence = _source_confidence(supplier_type, title, result.url, result.snippet)
+    candidate_reason = reason or _candidate_reason(supplier_type, title, result.url, result.snippet)
+    return {
+        "title": title,
+        "url": result.url,
+        "supplierType": supplier_type,
+        "sourceConfidence": str(source_confidence),
+        "candidateReason": candidate_reason,
+        "candidateUrl": result.url,
+        "discoveryQuery": _base_search_query(query_text),
+        "searchEngine": result.engine,
+    }
+
+
+def _annotate_product_with_discovery(product: dict[str, Any], link: dict[str, str]) -> None:
+    attributes = product.setdefault("attributes", {})
+    if not isinstance(attributes, dict):
+        attributes = {}
+        product["attributes"] = attributes
+    supplier_type = link.get("supplierType") or _supplier_candidate_type(
+        str(product.get("title") or link.get("title") or ""),
+        str(product.get("productUrl") or link.get("url") or ""),
+    )
+    attributes.setdefault("supplierType", supplier_type)
+    attributes.setdefault(
+        "sourceConfidence",
+        link.get("sourceConfidence")
+        or str(_source_confidence(supplier_type, str(product.get("title") or link.get("title") or ""), str(product.get("productUrl") or link.get("url") or ""))),
+    )
+    attributes.setdefault("candidateReason", link.get("candidateReason") or _candidate_reason(supplier_type, str(link.get("title") or ""), str(link.get("url") or "")))
+    attributes.setdefault("candidateUrl", link.get("candidateUrl") or link.get("url") or str(product.get("productUrl") or ""))
+    if link.get("discoveryQuery"):
+        attributes.setdefault("discoveryQuery", link["discoveryQuery"])
+    if link.get("searchEngine"):
+        attributes.setdefault("searchEngine", link["searchEngine"])
+    attributes["contactConfidence"] = str(_contact_confidence(product.get("contacts")))
+
+
+def _supplier_candidate_type(title: str, url: str, snippet: str = "") -> str:
+    text = f"{title} {url} {snippet}".lower()
+    if any(marker in text for marker in ("login", "sign in", "signin", "/cart", "/basket", "/account")):
+        return "blocked_or_account"
+    if any(marker in text for marker in ("blog", "review", "article", "news", "forum", "youtube", "pinterest", "/docs/", "/documentation/")):
+        return "content_page"
+    if any(marker in text for marker in ("manufacturer", "factory", "oem", "odm", "producer", "made in")):
+        return "manufacturer"
+    if any(marker in text for marker in ("distributor", "authorized distributor", "reseller", "stock", "in stock", "inventory")):
+        return "distributor"
+    marketplaces = ("alibaba", "amazon.", "ebay.", "aliexpress", "digikey", "mouser", "arrow.com", "rs-online", "tme.eu")
+    if any(marker in text for marker in marketplaces):
+        return "marketplace"
+    if any(marker in url.lower() for marker in ("/product/", "/products/", "/item/", "/items/", "/p/", "/dp/", "/sku/")):
+        return "product_page"
+    if any(marker in url.lower() for marker in ("/contact", "/about", "/sales", "/distributors")):
+        return "contact_page"
+    return "unknown"
+
+
+def _source_confidence(supplier_type: str, title: str, url: str, snippet: str = "") -> int:
+    confidence_by_type = {
+        "manufacturer": 88,
+        "distributor": 84,
+        "marketplace": 72,
+        "product_page": 68,
+        "contact_page": 56,
+        "unknown": 45,
+        "content_page": 20,
+        "blocked_or_account": 10,
+    }
+    score = confidence_by_type.get(supplier_type, 45)
+    combined = f"{title} {url} {snippet}".lower()
+    if any(marker in combined for marker in ("price", "moq", "wholesale", "rfq", "quote", "stock", "datasheet")):
+        score += 5
+    if any(marker in url.lower() for marker in ("/login", "/signin", "/cart", "/search")):
+        score -= 20
+    return max(0, min(100, score))
+
+
+def _candidate_reason(supplier_type: str, title: str, url: str, snippet: str = "") -> str:
+    if supplier_type == "manufacturer":
+        return "manufacturer wording found"
+    if supplier_type == "distributor":
+        return "distributor or stock wording found"
+    if supplier_type == "marketplace":
+        return "known marketplace or catalog domain"
+    if supplier_type == "product_page":
+        return "direct product URL pattern"
+    if supplier_type == "contact_page":
+        return "supplier contact page"
+    if supplier_type in {"content_page", "blocked_or_account"}:
+        return "low-value sourcing page"
+    return "search result candidate"
+
+
+def _score_search_result_candidate(result: WebSearchResult, query_terms: list[str]) -> int:
+    score = _score_candidate_link(result.title, result.url, query_terms)
+    supplier_type = _supplier_candidate_type(result.title, result.url, result.snippet)
+    score += {
+        "manufacturer": 18,
+        "distributor": 18,
+        "marketplace": 10,
+        "product_page": 9,
+        "contact_page": 2,
+        "unknown": 0,
+        "content_page": -20,
+        "blocked_or_account": -30,
+    }.get(supplier_type, 0)
+    score += result.score
+    return score
+
+
+def _supplier_contact_candidate_pages(product_url: str, product: dict[str, Any] | None = None) -> list[str]:
+    candidates: list[str] = []
+    if product:
+        attributes = product.get("attributes")
+        if isinstance(attributes, dict):
+            candidates.extend(_attribute_contact_links(attributes.get("contactLinks")))
+    candidates.extend(_supplier_domain_contact_pages(product_url))
+    return _unique_strings([candidate for candidate in candidates if candidate])
+
+
+def _attribute_contact_links(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    stripped = value.strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [item.strip() for item in stripped.split(",") if item.strip()]
+
+
+def _supplier_domain_contact_pages(product_url: str) -> list[str]:
+    parsed = urlparse(product_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return []
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    return [
+        f"{base}/contact",
+        f"{base}/contact-us",
+        f"{base}/contacts",
+        f"{base}/support",
+        f"{base}/customer-service",
+        f"{base}/sales",
+        f"{base}/where-to-buy",
+        f"{base}/dealers",
+        f"{base}/dealer-locator",
+        f"{base}/distributor",
+        f"{base}/distributors",
+        f"{base}/about",
+        f"{base}/about-us",
+        f"{base}/impressum",
+    ]
+
+
+def _merge_contacts(existing: Any, discovered: Any) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in (existing, discovered):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            contact_type = str(item.get("type") or "").strip().lower()
+            value = str(item.get("value") or "").strip()
+            if not contact_type or not value:
+                continue
+            key = (contact_type, value.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"type": contact_type, "value": value})
+    return merged
+
+
+def _has_enough_valid_products(products: list[dict[str, Any]], max_results: int | None) -> bool:
+    if max_results is None:
+        return False
+    try:
+        required = int(max_results)
+    except (TypeError, ValueError):
+        return False
+    if required <= 0:
+        return False
+    valid_count = sum(1 for product in products if _is_valid_search_product_payload(product))
+    return valid_count >= required
+
+
+def _is_valid_search_product_payload(product: dict[str, Any]) -> bool:
+    if not isinstance(product, dict):
+        return False
+    if not str(product.get("title") or "").strip():
+        return False
+    product_url = str(product.get("productUrl") or product.get("product_url") or "").strip()
+    parsed = urlparse(product_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    contacts = product.get("contacts")
+    return isinstance(contacts, list) and any(
+        isinstance(contact, dict)
+        and str(contact.get("type") or "").strip().lower() in {"email", "telegram"}
+        and str(contact.get("value") or "").strip()
+        for contact in contacts
+    )
+
+
+def _contact_confidence(contacts: Any) -> int:
+    if not isinstance(contacts, list) or not contacts:
+        return 0
+    types = {
+        str(item.get("type") or "").strip().lower()
+        for item in contacts
+        if isinstance(item, dict) and str(item.get("value") or "").strip()
+    }
+    if "email" in types:
+        return 100
+    if "telegram" in types:
+        return 80
+    return 60
 
 
 def _price_from_text(text: str) -> str | None:

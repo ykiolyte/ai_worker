@@ -237,6 +237,10 @@ a {
   z-index: 2;
   margin: -22px -22px 0;
   padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   background: color-mix(in srgb, var(--app-bg) 90%, transparent);
   border-bottom: 1px solid var(--border-color);
   backdrop-filter: blur(14px);
@@ -352,6 +356,23 @@ textarea {
 .inline-link.secondary:hover,
 .table-link:hover {
   background: color-mix(in srgb, var(--primary-accent) 18%, transparent);
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+}
+
+.icon-button:hover {
+  color: var(--text-primary);
+  background: var(--active-item);
 }
 
 .bubble-card,
@@ -544,7 +565,8 @@ textarea {
 }
 
 .demo-badge,
-.status-badge {
+.status-badge,
+.supplier-rating {
   display: inline-flex;
   align-items: center;
   width: fit-content;
@@ -562,6 +584,60 @@ textarea {
 .status-badge {
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+
+.supplier-rating {
+  color: #ffffff;
+  background: var(--primary-accent);
+}
+
+.rating-excellent {
+  background: var(--success);
+}
+
+.rating-strong {
+  background: var(--primary-accent);
+}
+
+.rating-average {
+  color: #5b3b00;
+  background: #ffd166;
+}
+
+.rating-weak {
+  background: var(--error);
+}
+
+.comparison-metrics,
+.supplier-score-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.supplier-score-panel {
+  display: grid;
+  align-items: start;
+  padding: 10px;
+  background: color-mix(in srgb, var(--primary-accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-accent) 24%, var(--border-color));
+  border-radius: 12px;
+}
+
+.supplier-score-panel h3 {
+  margin: 0;
+}
+
+.comparison-metrics span,
+.comparison-metrics strong {
+  width: fit-content;
+  padding: 5px 8px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 9%, transparent);
+  border-radius: 999px;
+  font-size: 0.82rem;
 }
 
 .status-running,
@@ -686,6 +762,85 @@ textarea {
   border-radius: 12px;
 }
 
+.assistant-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.assistant-drawer {
+  position: fixed;
+  top: 76px;
+  right: 22px;
+  bottom: 22px;
+  z-index: 10;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  width: min(430px, calc(100vw - 32px));
+  overflow: hidden;
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.18);
+}
+
+.assistant-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assistant-drawer-header h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.assistant-panel h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.assistant-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assistant-thread {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.assistant-message {
+  max-width: min(760px, 100%);
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  overflow-wrap: anywhere;
+}
+
+.assistant-message.user {
+  justify-self: end;
+  background: color-mix(in srgb, var(--primary-accent) 12%, var(--panel-bg));
+}
+
+.assistant-message p {
+  white-space: pre-wrap;
+}
+
+.assistant-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .error-summary,
 .error-text {
   color: var(--error);
@@ -750,6 +905,13 @@ textarea {
   .inline-form {
     grid-template-columns: 1fr;
   }
+
+  .assistant-drawer {
+    top: 72px;
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+  }
 }
 
 @media (max-width: 560px) {
@@ -760,6 +922,11 @@ textarea {
   .chat-header {
     margin: -14px -14px 0;
     padding: 14px;
+    align-items: flex-start;
+  }
+
+  .assistant-input {
+    grid-template-columns: 1fr;
   }
 
   .attachment-card {

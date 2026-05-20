@@ -48,6 +48,21 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("createSearchRequest(queryText: string, maxResults: number)", api)
         self.assertIn("JSON.stringify({ queryText, maxResults })", api)
 
+    def test_request_catalog_has_duplicate_supplier_category(self):
+        page = read("pages/RequestCatalogPage.tsx")
+        api = read("api.ts")
+        types = read("types.ts")
+        for expected in [
+            "duplicates",
+            "ProductCatalogResponse",
+            "duplicateReason",
+            "isDuplicate",
+            "Дубликаты",
+            'catalogFilter === "duplicates"',
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, page + api + types)
+
     def test_supplier_message_preferences_are_typed_and_sent(self):
         api = read("api.ts")
         types = read("types.ts")
@@ -88,6 +103,26 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text + types)
 
+    def test_request_catalog_shows_supplier_comparison_rating(self):
+        text = read("pages/RequestCatalogPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "SupplierComparison",
+            "supplierComparison",
+            "overallRating",
+            "priceRank",
+            "priceDeltaPercent",
+            "priceScore",
+            "contactabilityScore",
+            "responseScore",
+            "dataCompletenessScore",
+            "sourceTraceabilityScore",
+            "supplier-rating",
+            "comparison-metrics",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text + types)
+
     def test_search_request_rows_link_to_catalog(self):
         text = read("pages/SearchRequestsPage.tsx")
 
@@ -97,6 +132,14 @@ class FrontendContractTest(unittest.TestCase):
         text = read("pages/RequestCatalogPage.tsx")
 
         self.assertIn("/products/${product.id}", text)
+
+    def test_demo_cards_do_not_link_to_unresolvable_demo_source(self):
+        catalog = read("pages/RequestCatalogPage.tsx")
+        detail = read("pages/ProductDetailsPage.tsx")
+
+        self.assertIn('sourceDomain === "demo.local"', catalog + detail)
+        self.assertIn("{!isDemo && (", catalog)
+        self.assertIn("{!isDemo && (", detail)
 
     def test_product_details_contact_states(self):
         text = read("pages/ProductDetailsPage.tsx")
@@ -180,6 +223,64 @@ class FrontendContractTest(unittest.TestCase):
         for expected in ["recordInboundMessage", "requestAgentReply", "/conversation-messages", "/conversation-reply"]:
             with self.subTest(expected=expected):
                 self.assertIn(expected, api)
+
+    def test_product_details_can_download_supplier_excel_export(self):
+        api = read("api.ts")
+        page = read("pages/ProductDetailsPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "downloadProductExport",
+            "/export.xlsx",
+            "saveProductExport",
+            "РЎРѕС…СЂР°РЅРёС‚СЊ Excel",
+            "contactQualityScore",
+            "communicationScore",
+            "isPreferred?: boolean",
+            "qualityScore?: number",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, api + page + types)
+
+    def test_product_details_has_contracts_tab_and_download_action(self):
+        api = read("api.ts")
+        page = read("pages/ProductDetailsPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "ContractDraft",
+            "contractDrafts",
+            "listContractDrafts",
+            "createContractDraft",
+            "downloadContractDraft",
+            "/contracts",
+            "contracts-tab",
+            "Договоры",
+            "submitContractDraft",
+            "saveContractDraft",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, api + page + types)
+
+    def test_product_details_has_internal_ai_assistant_chat(self):
+        api = read("api.ts")
+        page = read("pages/ProductDetailsPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "askProductAssistant",
+            "/assistant-chat",
+            "InternalAssistantMessage",
+            "assistantMessages",
+            "assistantOpen",
+            "setAssistantOpen",
+            "assistant-drawer",
+            "loadedProduct.assistantMessages",
+            "messages: InternalAssistantMessage[]",
+            "assistantPrompts",
+            "AI Assistant",
+            "Внутренний чат не отправляет сообщения поставщику",
+            "submitAssistantQuestion",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, api + page + types)
 
     def test_product_details_auto_syncs_gmail_before_loading(self):
         api = read("api.ts")

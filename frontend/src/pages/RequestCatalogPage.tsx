@@ -1,7 +1,7 @@
-import { ArrowRight, Eye } from "lucide-react";
+﻿import { ArrowRight, Eye } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getSearchRequest, listProducts } from "../api";
-import { formatDuration, formatNullable, formatPrice, progressPercent, remainingHint, stageLabel, statusClass, statusLabel } from "../components/format";
+import { formatDuration, formatNullable, formatPrice, formatPriceDelta, formatPriceRank, progressPercent, ratingLabel, remainingHint, stageLabel, statusClass, statusLabel } from "../components/format";
 import type { ProductCard, SearchRequestItem } from "../types";
 
 interface Props {
@@ -10,6 +10,7 @@ interface Props {
 
 export function RequestCatalogPage({ searchRequestId }: Props) {
   const [items, setItems] = useState<ProductCard[]>([]);
+  const [duplicates, setDuplicates] = useState<ProductCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [page, setPage] = useState(1);
@@ -25,6 +26,7 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
       const [request, response] = await Promise.all([getSearchRequest(searchRequestId), listProducts(searchRequestId)]);
       setSearchRequest(request);
       setItems(response.items);
+      setDuplicates(response.duplicates ?? []);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Не удалось загрузить каталог");
     } finally {
@@ -47,7 +49,11 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
   }, [searchRequest?.status, searchRequestId]);
 
   const pageSize = 20;
-  const filteredItems = items.filter((product) => {
+  const catalogItems = catalogFilter === "duplicates" ? duplicates : items;
+  const filteredItems = catalogItems.filter((product) => {
+    if (catalogFilter === "duplicates") {
+      return true;
+    }
     const contacts = product.contacts ?? [];
     const isDemo = product.attributes.demo === "true" || product.sourceDomain === "demo.local";
     if (catalogFilter === "with-contact") {
@@ -73,6 +79,7 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
     ["with-contact", "С контактом"],
     ["without-contact", "Без контакта"],
     ["demo", "Демо"],
+    ["duplicates", `Дубликаты (${duplicates.length})`],
     ["email", "Email"],
     ["telegram", "Telegram"],
   ];
@@ -119,7 +126,7 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
       )}
       {!loading && !error && items.length === 0 && <p className="system-message">Товары не найдены</p>}
 
-      {!loading && !error && items.length > 0 && (
+      {!loading && !error && (items.length > 0 || duplicates.length > 0) && (
         <div className="catalog-filters" aria-label="Фильтры каталога">
           {filters.map(([value, label]) => (
             <button
@@ -142,6 +149,7 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
           const contacts = product.contacts ?? [];
           const primaryContact = contacts[0];
           const isDemo = product.attributes.demo === "true" || product.sourceDomain === "demo.local";
+          const isDuplicate = product.isDuplicate === true || catalogFilter === "duplicates";
           const previewImage = product.images[0];
           return (
             <article className={`product-card attachment-card message-bubble ${isDemo ? "product-card-demo" : ""}`} key={product.id}>
@@ -151,21 +159,44 @@ export function RequestCatalogPage({ searchRequestId }: Props) {
               <div className="attachment-body">
                 <div className="card-title-row">
                   <h3>{product.title}</h3>
+                  {product.supplierComparison && (
+                    <span className={`supplier-rating rating-${product.supplierComparison.ratingLabel}`}>
+                      {product.supplierComparison.overallRating}/100
+                    </span>
+                  )}
                   {isDemo && <span className="demo-badge">Демо</span>}
+                  {isDuplicate && <span className="demo-badge">Дубликат</span>}
                 </div>
                 <p>{formatPrice(product.price, product.currency) || "Цена не найдена"}</p>
                 <p>{formatNullable(product.supplierName, "Поставщик не указан")}</p>
+                {product.supplierComparison && (
+                  <section className="comparison-metrics" aria-label="Supplier comparison metrics">
+                    <strong>{ratingLabel(product.supplierComparison.ratingLabel)}</strong>
+                    <span>{formatPriceRank(product.supplierComparison.priceRank, product.supplierComparison.comparedProductsCount)}</span>
+                    <span>{formatPriceDelta(product.supplierComparison.priceDeltaPercent)}</span>
+                    <span>Price {product.supplierComparison.metrics.priceScore}</span>
+                    <span>Contact {product.supplierComparison.metrics.contactabilityScore}</span>
+                    <span>Response {product.supplierComparison.metrics.responseScore}</span>
+                    <span>Data {product.supplierComparison.metrics.dataCompletenessScore}</span>
+                    <span>Source {product.supplierComparison.metrics.sourceTraceabilityScore}</span>
+                  </section>
+                )}
                 <p className="contact-summary">
                   {primaryContact ? `${primaryContact.contactType}: ${primaryContact.contactValue}` : "Контакт не найден"}
                 </p>
+                {isDuplicate && product.duplicateReason && <p className="muted">{product.duplicateReason}</p>}
                 <div className="product-card-actions">
-                  <a className="action-button primary" href={`/products/${product.id}`} aria-label={`Открыть карточку товара: ${product.title}`}>
-                    <Eye aria-hidden="true" />
-                    Открыть карточку
-                  </a>
-                  <a className="action-button secondary" href={product.productUrl} target="_blank" rel="noreferrer">
+                  {!isDuplicate && (
+                    <a className="action-button primary" href={`/products/${product.id}`} aria-label={`Открыть карточку товара: ${product.title}`}>
+                      <Eye aria-hidden="true" />
+                      Открыть карточку
+                    </a>
+                  )}
+                  {!isDemo && (
+                    <a className="action-button secondary" href={product.productUrl} target="_blank" rel="noreferrer">
                     Открыть источник <ArrowRight aria-hidden="true" />
-                  </a>
+                    </a>
+                  )}
                 </div>
               </div>
             </article>

@@ -10,6 +10,8 @@ from backend.app.domain import (
     ContactAttempt,
     ContactAttemptStatus,
     ContactType,
+    ContractDraft,
+    ContractDraftStatus,
     ConversationDirection,
     ConversationMessage,
     ConversationMessageStatus,
@@ -114,6 +116,27 @@ class ContactAttemptPolicyTest(unittest.TestCase):
         active.transition_to(ContactAttemptStatus.RUNNING)
         active.transition_to(ContactAttemptStatus.FAILED)
         self.assertFalse(ContactAttempt.has_active([active, sent]))
+
+
+class ContractDraftPolicyTest(unittest.TestCase):
+    def test_contract_draft_status_transitions_and_download_policy(self):
+        draft = ContractDraft.create(product_id=uuid4(), supplier_contact_id=uuid4(), supplier_name="Supplier Test")
+
+        self.assertEqual(ContractDraftStatus.QUEUED, draft.status)
+        self.assertFalse(draft.is_downloadable())
+        draft.transition_to(ContractDraftStatus.RUNNING)
+        draft.mark_ready("DRAFT CONTRACT\nSupplier: Supplier Test", {"product": "FC-100"})
+
+        self.assertEqual(ContractDraftStatus.READY, draft.status)
+        self.assertTrue(draft.is_downloadable())
+        self.assertIn("draft", draft.file_name)
+
+    def test_contract_draft_rejects_unsafe_commitment_text(self):
+        draft = ContractDraft.create(product_id=uuid4(), supplier_contact_id=uuid4(), supplier_name="Supplier Test")
+
+        draft.transition_to(ContractDraftStatus.RUNNING)
+        with self.assertRaises(ValueError):
+            draft.mark_ready("DRAFT CONTRACT\nWe confirm the order and will pay now.", {})
 
 
 class ConversationMessageContractTest(unittest.TestCase):
@@ -275,6 +298,16 @@ class RepositoryContractTest(unittest.TestCase):
 
         self.assertEqual([first, second], repo.list_conversation_messages_for_product(product_id))
         self.assertEqual([], repo.list_conversation_messages_for_product(uuid4()))
+
+    def test_contract_repository_is_separate_from_sourcing_repository(self):
+        repo = InMemoryRepository()
+        draft = ContractDraft.create(product_id=uuid4(), supplier_contact_id=uuid4(), supplier_name="Supplier Test")
+
+        repo.contracts.add_contract_draft(draft)
+
+        self.assertEqual(draft, repo.contracts.get_contract_draft(draft.id))
+        self.assertEqual([], repo.list_attempts_for_product(draft.product_id))
+        self.assertEqual([], repo.list_conversation_messages_for_product(draft.product_id))
 
 
 if __name__ == "__main__":

@@ -12,3 +12,4 @@ dist/
 .ms-playwright/
 .tmp/
 .playwright-mcp/
+/.tmp_repo_review
