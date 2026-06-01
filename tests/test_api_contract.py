@@ -70,6 +70,8 @@ class SupplierAnalysisModelProvider(FakeModelProvider):
 class InternalAssistantModelProvider(FakeModelProvider):
     def complete(self, prompt: str, tools=None):
         if "internal AI assistant" in prompt:
+            if "User internal question: \u0427\u0442\u043e" in prompt:
+                return "\u0423\u0442\u043e\u0447\u043d\u0438\u0442\u0435 MOQ, \u0441\u0440\u043e\u043a\u0438 \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438 \u0438 \u0443\u0441\u043b\u043e\u0432\u0438\u044f \u043e\u043f\u043b\u0430\u0442\u044b."
             return "Ask the supplier for missing MOQ and delivery terms before comparing offers."
         return super().complete(prompt, tools)
 
@@ -88,6 +90,33 @@ class JsonInternalAssistantModelProvider(FakeModelProvider):
                     "Verify supplier reliability through additional communication.",
                 ],
             }
+        return super().complete(prompt, tools)
+
+
+class PromptEchoInternalAssistantModelProvider(FakeModelProvider):
+    def complete(self, prompt: str, tools=None):
+        if "internal AI assistant" in prompt:
+            return {"queries": [prompt]}
+        return super().complete(prompt, tools)
+
+
+class InvalidThenRussianInternalAssistantModelProvider(FakeModelProvider):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def complete(self, prompt: str, tools=None):
+        if "internal AI assistant" in prompt:
+            self.calls += 1
+            if self.calls == 1:
+                return "There might be a typo. Could you please clarify what information you need?"
+            return (
+                "\u041f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a \u043f\u043e\u0434\u0445\u043e\u0434\u0438\u0442 "
+                "\u0434\u043b\u044f \u043f\u0435\u0440\u0432\u0438\u0447\u043d\u043e\u0439 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438: "
+                "\u0435\u0441\u0442\u044c MOQ 10 Pieces \u0438 \u0442\u0438\u043f Manufacturer/Factory. "
+                "\u041d\u0443\u0436\u043d\u043e \u0443\u0442\u043e\u0447\u043d\u0438\u0442\u044c \u0446\u0435\u043d\u0443, "
+                "\u0441\u0440\u043e\u043a\u0438 \u0438 \u0443\u0441\u043b\u043e\u0432\u0438\u044f \u043e\u043f\u043b\u0430\u0442\u044b."
+            )
         return super().complete(prompt, tools)
 
 
@@ -255,6 +284,30 @@ class ApiContractTest(unittest.TestCase):
         self.assertEqual(7, request.max_results)
         self.assertEqual(7, task.input_payload["maxResults"])
 
+    def test_post_search_requests_accepts_sourcing_advanced_fields(self):
+        status, body = request_json(
+            self.app,
+            "POST",
+            "/api/search-requests",
+            {
+                "queryText": "ПК, вычислительные компьютеры, ноутбуки",
+                "maxResults": 6,
+                "targetMarket": "EU",
+                "quantity": "100 units",
+                "budget": "50000 USD",
+                "certifications": ["CE", "RoHS"],
+                "supplierPreference": "manufacturer_first",
+            },
+        )
+
+        self.assertEqual(201, status)
+        self.assertEqual("EU", body["targetMarket"])
+        self.assertEqual(["CE", "RoHS"], body["certifications"])
+        request = next(iter(self.repo.search_requests.values()))
+        task = next(iter(self.repo.agent_tasks.values()))
+        self.assertEqual("manufacturer_first", request.supplier_preference)
+        self.assertEqual("EU", task.input_payload["targetMarket"])
+
     def test_post_search_requests_can_auto_process_local_demo_task(self):
         browser = BrowserConnector()
         with patch.dict("os.environ", {"AUTO_PROCESS_SEARCH_TASKS": "true"}, clear=False):
@@ -274,7 +327,7 @@ class ApiContractTest(unittest.TestCase):
         task = next(iter(self.repo.agent_tasks.values()))
         self.assertEqual("completed", request.status.value)
         self.assertEqual("completed", task.status.value)
-        self.assertEqual(2, len(self.repo.products))
+        self.assertEqual(1, len(self.repo.products))
 
     def test_post_search_requests_validates_query(self):
         invalid_payloads = [
@@ -351,7 +404,24 @@ class ApiContractTest(unittest.TestCase):
             price=None,
             currency=None,
             contacts=[contact],
+            moq="10 Pieces",
+            price_range="Negotiable",
+            fit_score="0.72",
+            fit_summary="Matches rack workstation intent.",
+            matched_requirements=[{"requirement": "rack workstation", "evidence": "Title matches"}],
+            missing_requirements=["No certification evidence found"],
+            supplier_badges=["Manufacturer"],
+            supplier_country="China",
+            supplier_city="Shenzhen",
+            is_verified_supplier=True,
         )
+        request.normalized_intent = {"rawQuery": request.query_text, "supplierPreference": "manufacturer_first"}
+        request.missing_fields = ["budget"]
+        request.clarifying_questions = ["Какой бюджет?"]
+        request.common_filters = ["Manufacturer"]
+        request.product_attributes = [{"name": "Application", "values": ["Industrial"]}]
+        request.sourcing_guidance = {"riskWarnings": ["Verify certificates"]}
+        request.suppliers_count = 1
         contact.product_id = product.id
         self.repo.add_product(product)
         attempt = self.repo.add_contact_attempt(
@@ -373,16 +443,24 @@ class ApiContractTest(unittest.TestCase):
         status, request_body = request_json(self.app, "GET", f"/api/search-requests/{request.id}")
         self.assertEqual(200, status)
         self.assertEqual(42, request_body["durationSeconds"])
+        self.assertEqual(["budget"], request_body["missingFields"])
+        self.assertEqual(1, request_body["suppliersCount"])
 
         status, products = request_json(self.app, "GET", f"/api/search-requests/{request.id}/products")
         self.assertEqual(200, status)
         self.assertEqual(1, len(products["items"]))
         self.assertIsNone(products["items"][0]["price"])
+        self.assertEqual("Negotiable", products["items"][0]["priceRange"])
+        self.assertEqual("10 Pieces", products["items"][0]["moq"])
+        self.assertEqual("0.72", products["items"][0]["fitScore"])
+        self.assertEqual("Manufacturer", products["items"][0]["supplierBadges"][0])
         self.assertEqual("supplier@example.test", products["items"][0]["contacts"][0]["contactValue"])
 
         status, detail = request_json(self.app, "GET", f"/api/products/{product.id}")
         self.assertEqual(200, status)
         self.assertEqual("E2E Rack Workstation RW-500", detail["title"])
+        self.assertEqual("Matches rack workstation intent.", detail["fitSummary"])
+        self.assertEqual("rack workstation", detail["matchedRequirements"][0]["requirement"])
         self.assertEqual("supplier@example.test", detail["contacts"][0]["contactValue"])
         self.assertEqual(1, len(detail["conversationMessages"]))
         self.assertEqual("sent", detail["conversationMessages"][0]["status"])
@@ -390,6 +468,16 @@ class ApiContractTest(unittest.TestCase):
         self.assertEqual("gmail-message-id", detail["conversationMessages"][0]["externalMessageId"])
         self.assertEqual("2026-05-02T15:01:02+00:00", detail["conversationMessages"][0]["providerTimestamp"])
         self.assertEqual("Здравствуйте, уточните условия поставки.", detail["conversationMessages"][0]["body"])
+
+    def test_get_search_request_accepts_naive_sqlite_datetimes(self):
+        request = self.repo.add_search_request(SearchRequest.create("E2E SQLite duration"))
+        request.started_at = datetime(2026, 5, 2, 15, 0, 0)
+        request.completed_at = datetime(2026, 5, 2, 15, 0, 42)
+
+        status, body = request_json(self.app, "GET", f"/api/search-requests/{request.id}")
+
+        self.assertEqual(200, status)
+        self.assertEqual(42, body["durationSeconds"])
 
     def test_products_include_supplier_comparison_rating(self):
         request = self.repo.add_search_request(SearchRequest.create("E2E supplier comparison"))
@@ -886,6 +974,68 @@ class ApiContractTest(unittest.TestCase):
         self.assertIn("Уровень риска: Low", body["reply"])
         self.assertIn("Причины:", body["reply"])
         self.assertIn("Следующие шаги:", body["reply"])
+
+    def test_product_internal_assistant_rejects_prompt_echo_instead_of_using_fallback(self):
+        request = self.repo.add_search_request(SearchRequest.create("E2E assistant echo"))
+        product = Product(
+            search_request_id=request.id,
+            title="Wholesale Street Legal Antique Electric Lithium Golf Cart",
+            product_url="https://yzwhl88.en.made-in-china.com/product/example.html",
+            contacts=[],
+            supplier_name="Yangzhou Whanlong Electric Vehicle Co., Ltd.",
+            attributes={
+                "sourcePlatform": "made-in-china",
+                "madeInChinaPriceText": "Negotiable",
+                "moq": "10 Pieces (MOQ)",
+                "businessType": "Manufacturer/Factory & Trading Company",
+                "availability": "instock",
+                "discoveryQuery": "Термоусадка клеевая диаметром 4/2 мм. Черная",
+            },
+        )
+        self.repo.add_product(product)
+        app = create_app(self.repo, runtime=runtime_with_model(PromptEchoInternalAssistantModelProvider()))
+
+        status, body = request_json(
+            app,
+            "POST",
+            f"/api/products/{product.id}/assistant-chat",
+            {"message": "Что думаешь о этом поставщике"},
+        )
+
+        self.assertEqual(502, status)
+        self.assertIn("no usable answer", body["detail"])
+
+    def test_product_internal_assistant_retries_invalid_language_without_fallback(self):
+        request = self.repo.add_search_request(SearchRequest.create("E2E assistant retry"))
+        product = Product(
+            search_request_id=request.id,
+            title="Wholesale Street Legal Antique Electric Lithium Golf Cart",
+            product_url="https://yzwhl88.en.made-in-china.com/product/example.html",
+            contacts=[],
+            supplier_name="Yangzhou Whanlong Electric Vehicle Co., Ltd.",
+            attributes={
+                "sourcePlatform": "made-in-china",
+                "madeInChinaPriceText": "Negotiable",
+                "moq": "10 Pieces (MOQ)",
+                "businessType": "Manufacturer/Factory & Trading Company",
+                "availability": "instock",
+            },
+        )
+        self.repo.add_product(product)
+        provider = InvalidThenRussianInternalAssistantModelProvider()
+        app = create_app(self.repo, runtime=runtime_with_model(provider))
+
+        status, body = request_json(
+            app,
+            "POST",
+            f"/api/products/{product.id}/assistant-chat",
+            {"message": "\u0427\u0442\u043e \u0434\u0443\u043c\u0430\u0435\u0448\u044c \u043e \u044d\u0442\u043e\u043c \u043f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a\u0435"},
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual(2, provider.calls)
+        self.assertIn("\u041f\u043e\u0441\u0442\u0430\u0432\u0449\u0438\u043a", body["reply"])
+        self.assertNotIn("clarify", body["reply"].lower())
 
 
     def test_contract_draft_api_creates_lists_and_downloads_ready_draft(self):

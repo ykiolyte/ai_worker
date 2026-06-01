@@ -1,5 +1,37 @@
 # Development
 
+## SourcingAI-like Search Runtime
+
+The `enhance-sourcingai-like-search` change adds a clean-room SourcingAI-like
+search flow. The implementation uses the project's own domain model and
+connectors; it does not copy Made-in-China code/assets, call private APIs,
+replay signed requests, use unauthorized sessions, or bypass CAPTCHA/WAF/rate
+limits.
+
+Production-like runtime must use durable storage:
+
+- Backend `create_app()` uses a SQLAlchemy/PostgreSQL-backed repository by
+  default outside explicit unit-test injection.
+- Worker runtime uses the same `DATABASE_URL` repository and processes durable
+  queued `AgentTask` records.
+- `InMemoryRepository` is only for explicitly injected tests/local isolated
+  contracts.
+
+Provider configuration:
+
+```env
+ENABLE_MADE_IN_CHINA_PROVIDER=false
+MADE_IN_CHINA_PROVIDER_MAX_RESULTS=20
+MADE_IN_CHINA_PROVIDER_RATE_LIMIT_SECONDS=3
+SEARCH_PROVIDER_ORDER=made_in_china_public,generic_web,browser_mcp
+DISABLE_DEMO_PRODUCT_INJECTION=true
+```
+
+Set `DISABLE_DEMO_PRODUCT_INJECTION=true` or `APP_ENV=e2e` for acceptance runs.
+Final E2E still requires real WebUI, Backend API, PostgreSQL, broker, worker,
+ModelProvider, Browser MCP, email connector, Telegram connector when configured,
+and the controlled supplier test site.
+
 ## Prerequisites
 
 - Python 3.12+

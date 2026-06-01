@@ -23,6 +23,7 @@ class DatabaseMigrationContractTest(unittest.TestCase):
             "contact_attempts",
             "conversation_messages",
             "agent_tasks",
+            "contract_drafts",
         ]:
             with self.subTest(table=table):
                 self.assertRegex(self.migration_text, rf"create_table\(\s*[\"']{table}[\"']")
@@ -48,6 +49,7 @@ class DatabaseMigrationContractTest(unittest.TestCase):
             "idx_conversation_messages_contact_attempt_id",
             "idx_agent_tasks_status",
             "idx_search_requests_status",
+            "idx_contract_drafts_product_id",
         ]:
             with self.subTest(index=index):
                 self.assertIn(index, self.migration_text)
@@ -68,6 +70,58 @@ class DatabaseMigrationContractTest(unittest.TestCase):
         self.assertIn("max_results", self.migration_text)
         max_results_match = re.search(r"sa\.Column\([\"']max_results[\"'].*?nullable=False", self.migration_text, re.S)
         self.assertIsNotNone(max_results_match, "search_requests.max_results must be required")
+
+    def test_search_requests_sourcing_metadata_is_persisted(self):
+        for column in [
+            "normalized_intent",
+            "missing_fields",
+            "clarifying_questions",
+            "common_filters",
+            "product_attributes",
+            "sourcing_guidance",
+            "suppliers_count",
+        ]:
+            with self.subTest(column=column):
+                self.assertIn(column, self.migration_text)
+
+    def test_products_sourcing_card_fields_are_persisted(self):
+        for column in [
+            "moq",
+            "price_range",
+            "fit_score",
+            "fit_summary",
+            "matched_requirements",
+            "missing_requirements",
+            "supplier_badges",
+            "supplier_country",
+            "supplier_city",
+            "is_verified_supplier",
+            "is_audited_supplier",
+            "supports_customization",
+            "sample_available",
+        ]:
+            with self.subTest(column=column):
+                self.assertIn(column, self.migration_text)
+
+    def test_agent_tasks_allow_contract_draft_type(self):
+        self.assertIn("contract_draft", self.migration_text)
+
+    def test_contract_drafts_are_persisted(self):
+        for column in [
+            "product_id",
+            "supplier_contact_id",
+            "supplier_name",
+            "agent_task_id",
+            "status",
+            "title",
+            "extracted_data",
+            "draft_text",
+            "file_name",
+            "content_type",
+            "error_message",
+        ]:
+            with self.subTest(column=column):
+                self.assertIn(column, self.migration_text)
 
 
 if __name__ == "__main__":

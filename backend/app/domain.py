@@ -146,6 +146,18 @@ def validate_max_results(max_results: int) -> int:
 class SearchRequest:
     query_text: str
     max_results: int = 5
+    target_market: str | None = None
+    quantity: str | None = None
+    budget: str | None = None
+    certifications: list[str] = field(default_factory=list)
+    supplier_preference: str | None = None
+    normalized_intent: dict[str, Any] = field(default_factory=dict)
+    missing_fields: list[str] = field(default_factory=list)
+    clarifying_questions: list[str] = field(default_factory=list)
+    common_filters: list[str] = field(default_factory=list)
+    product_attributes: list[dict[str, Any]] = field(default_factory=list)
+    sourcing_guidance: dict[str, Any] = field(default_factory=dict)
+    suppliers_count: int = 0
     id: UUID = field(default_factory=uuid4)
     status: SearchRequestStatus = SearchRequestStatus.QUEUED
     error_message: str | None = None
@@ -156,10 +168,24 @@ class SearchRequest:
     completed_at: datetime | None = None
 
     @classmethod
-    def create(cls, query_text: str, max_results: int = 5) -> "SearchRequest":
+    def create(
+        cls,
+        query_text: str,
+        max_results: int = 5,
+        target_market: str | None = None,
+        quantity: str | None = None,
+        budget: str | None = None,
+        certifications: list[str] | None = None,
+        supplier_preference: str | None = None,
+    ) -> "SearchRequest":
         return cls(
             query_text=validate_search_query(query_text),
             max_results=validate_max_results(max_results),
+            target_market=_optional_text(target_market),
+            quantity=_optional_text(quantity),
+            budget=_optional_text(budget),
+            certifications=[str(value).strip() for value in (certifications or []) if str(value).strip()],
+            supplier_preference=_optional_text(supplier_preference),
         )
 
     def transition_to(self, next_status: SearchRequestStatus) -> None:
@@ -232,6 +258,19 @@ class Product:
     supplier_name: str | None = None
     source_domain: str | None = None
     raw_agent_payload: dict[str, Any] | None = None
+    moq: str | None = None
+    price_range: str | None = None
+    fit_score: Decimal | None = None
+    fit_summary: str | None = None
+    matched_requirements: list[dict[str, Any]] = field(default_factory=list)
+    missing_requirements: list[str] = field(default_factory=list)
+    supplier_badges: list[str] = field(default_factory=list)
+    supplier_country: str | None = None
+    supplier_city: str | None = None
+    is_verified_supplier: bool = False
+    is_audited_supplier: bool = False
+    supports_customization: bool = False
+    sample_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -249,6 +288,14 @@ def validate_product_payload(payload: dict[str, Any], allow_without_contacts: bo
         errors.append("title is required")
     if not validate_url(product_url):
         errors.append("productUrl must be a valid URL")
+    for index, image in enumerate(payload.get("images") or []):
+        if not validate_url(str(image)):
+            errors.append(f"images[{index}] must be a valid URL")
+    fit_score = _normalize_fit_score(payload.get("fitScore") if "fitScore" in payload else payload.get("fit_score"), errors)
+    matched_requirements = _normalize_matched_requirements(
+        payload.get("matchedRequirements") if "matchedRequirements" in payload else payload.get("matched_requirements"),
+        errors,
+    )
 
     contacts: list[SupplierContact] = []
     for index, contact_payload in enumerate(payload.get("contacts") or []):
@@ -277,10 +324,64 @@ def validate_product_payload(payload: dict[str, Any], allow_without_contacts: bo
         supplier_name=payload.get("supplierName") or payload.get("supplier_name"),
         source_domain=urlparse(product_url).netloc,
         raw_agent_payload=payload,
+        moq=payload.get("moq"),
+        price_range=payload.get("priceRange") or payload.get("price_range"),
+        fit_score=fit_score,
+        fit_summary=payload.get("fitSummary") or payload.get("fit_summary"),
+        matched_requirements=matched_requirements,
+        missing_requirements=[str(value) for value in (payload.get("missingRequirements") or payload.get("missing_requirements") or [])],
+        supplier_badges=[str(value) for value in (payload.get("supplierBadges") or payload.get("supplier_badges") or [])],
+        supplier_country=payload.get("supplierCountry") or payload.get("supplier_country"),
+        supplier_city=payload.get("supplierCity") or payload.get("supplier_city"),
+        is_verified_supplier=bool(payload.get("isVerifiedSupplier") or payload.get("is_verified_supplier")),
+        is_audited_supplier=bool(payload.get("isAuditedSupplier") or payload.get("is_audited_supplier")),
+        supports_customization=bool(payload.get("supportsCustomization") or payload.get("supports_customization")),
+        sample_available=bool(payload.get("sampleAvailable") or payload.get("sample_available")),
     )
     for contact in contacts:
         contact.product_id = product.id
     return ProductValidationResult(product=product, errors=[])
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _normalize_fit_score(value: Any, errors: list[str]) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        normalized = Decimal(str(value))
+    except Exception:
+        errors.append("fitScore must be a number between 0 and 1")
+        return None
+    if normalized < 0 or normalized > 1:
+        errors.append("fitScore must be between 0 and 1")
+        return None
+    return normalized
+
+
+def _normalize_matched_requirements(value: Any, errors: list[str]) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        errors.append("matchedRequirements must be a list")
+        return []
+    normalized = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict) or not str(item.get("requirement") or "").strip() or not str(item.get("evidence") or "").strip():
+            errors.append(f"matchedRequirements[{index}] must include requirement and evidence")
+            continue
+        normalized.append(
+            {
+                "requirement": str(item["requirement"]).strip(),
+                "evidence": str(item["evidence"]).strip(),
+            }
+        )
+    return normalized
 
 
 @dataclass

@@ -8,6 +8,11 @@ export function SearchRequestsPage() {
   const [items, setItems] = useState<SearchRequestItem[]>([]);
   const [queryText, setQueryText] = useState("");
   const [maxResults, setMaxResults] = useState(5);
+  const [targetMarket, setTargetMarket] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [budget, setBudget] = useState("");
+  const [certifications, setCertifications] = useState("");
+  const [supplierPreference, setSupplierPreference] = useState("manufacturer_first");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -49,17 +54,29 @@ export function SearchRequestsPage() {
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const created = await createSearchRequest(queryText.trim(), maxResults);
+    const created = await createSearchRequest(queryText.trim(), maxResults, {
+      targetMarket: targetMarket.trim() || null,
+      quantity: quantity.trim() || null,
+      budget: budget.trim() || null,
+      certifications: certifications.split(",").map((item) => item.trim()).filter(Boolean),
+      supplierPreference,
+    });
     setQueryText("");
+    setTargetMarket("");
+    setQuantity("");
+    setBudget("");
+    setCertifications("");
     setItems((current) => [created, ...current]);
+    window.history.pushState({}, "", `/search-requests/${created.id}/products`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
   return (
     <section className="workspace chat-workspace">
-      <header className="chat-header">
+      <header className="chat-header sourcing-hero">
         <div>
-          <h2>Поисковые запросы</h2>
-          <p>Создавайте запросы и наблюдайте за работой агента как за диалогом.</p>
+          <h2>SourcingAI поиск поставщиков</h2>
+          <p>Опишите товар, рынок и условия закупки; агент соберёт структурированные карточки и безопасные следующие шаги.</p>
         </div>
         <span className="toolbar-action">
           <Plus aria-hidden="true" />
@@ -91,10 +108,17 @@ export function SearchRequestsPage() {
         </article>
       </div>
 
-      <form className="inline-form bubble-card" onSubmit={submit}>
+      <form className="inline-form bubble-card sourcing-prompt" onSubmit={submit}>
         <label>
           <span>Текст запроса</span>
-          <input value={queryText} onChange={(event) => setQueryText(event.target.value)} minLength={3} maxLength={1000} />
+          <textarea
+            value={queryText}
+            onChange={(event) => setQueryText(event.target.value)}
+            minLength={3}
+            maxLength={1000}
+            rows={4}
+            placeholder="ПК, вычислительные компьютеры, ноутбуки"
+          />
         </label>
         <label>
           <span>Максимум результатов</span>
@@ -106,11 +130,47 @@ export function SearchRequestsPage() {
             max={50}
           />
         </label>
+        <label>
+          <span>Целевой рынок</span>
+          <input value={targetMarket} onChange={(event) => setTargetMarket(event.target.value)} placeholder="EU, Russia, GCC" />
+        </label>
+        <label>
+          <span>Количество</span>
+          <input value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="100 units" />
+        </label>
+        <label>
+          <span>Бюджет</span>
+          <input value={budget} onChange={(event) => setBudget(event.target.value)} placeholder="50000 USD" />
+        </label>
+        <label>
+          <span>Сертификаты</span>
+          <input value={certifications} onChange={(event) => setCertifications(event.target.value)} placeholder="CE, RoHS, FCC" />
+        </label>
+        <label>
+          <span>Тип поставщика</span>
+          <select value={supplierPreference} onChange={(event) => setSupplierPreference(event.target.value)}>
+            <option value="manufacturer_first">manufacturer_first</option>
+            <option value="distributor_allowed">distributor_allowed</option>
+            <option value="any">any</option>
+          </select>
+        </label>
         <button className="action-button primary" type="submit" disabled={queryText.trim().length < 3}>
           <Search aria-hidden="true" />
           Запустить поиск
         </button>
       </form>
+
+      <div className="examples system-message" aria-label="examples">
+        <button type="button" className="action-button secondary" onClick={() => setQueryText("ПК, вычислительные компьютеры, ноутбуки")}>
+          ПК, вычислительные компьютеры, ноутбуки
+        </button>
+        <button type="button" className="action-button secondary" onClick={() => setQueryText("industrial fanless mini PC manufacturer with CE")}>
+          Industrial mini PC
+        </button>
+        <button type="button" className="action-button secondary" onClick={() => setQueryText("OEM laptop factory sample available")}>
+          OEM laptop factory
+        </button>
+      </div>
 
       {loading && (
         <p className="system-message" role="status">

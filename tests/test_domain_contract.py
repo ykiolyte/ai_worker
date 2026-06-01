@@ -22,6 +22,12 @@ from backend.app.domain import (
     validate_product_payload,
 )
 from backend.app.repositories import InMemoryRepository
+from backend.app.sourcing import (
+    ProductCandidate,
+    ProductFitEvaluator,
+    ProductNormalizer,
+    SourcingSearchOutputSchema,
+)
 
 
 class SearchRequestValidationTest(unittest.TestCase):
@@ -45,6 +51,17 @@ class SearchRequestValidationTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     SearchRequest.create("E2E UAV Flight Controller", max_results=value)
+
+    def test_search_request_has_sourcing_defaults(self):
+        request = SearchRequest.create("ПК, вычислительные компьютеры, ноутбуки")
+
+        self.assertEqual({}, request.normalized_intent)
+        self.assertEqual([], request.missing_fields)
+        self.assertEqual([], request.clarifying_questions)
+        self.assertEqual([], request.common_filters)
+        self.assertEqual([], request.product_attributes)
+        self.assertEqual({}, request.sourcing_guidance)
+        self.assertEqual(0, request.suppliers_count)
 
     def test_invalid_terminal_transition_is_rejected(self):
         request = SearchRequest.create("E2E UAV Flight Controller")
@@ -71,6 +88,36 @@ class ProductValidationTest(unittest.TestCase):
         self.assertIsNone(result.product.currency)
         self.assertEqual([], result.errors)
 
+    def test_valid_extended_sourcing_product(self):
+        result = validate_product_payload(
+            {
+                "title": "Industrial Fanless Mini PC",
+                "productUrl": "https://supplier.test/products/mini-pc",
+                "priceRange": "Negotiable",
+                "moq": "10 Pieces",
+                "fitScore": 0.86,
+                "fitSummary": "Matches industrial computing request.",
+                "matchedRequirements": [
+                    {"requirement": "computer supplier", "evidence": "Title mentions Mini PC"}
+                ],
+                "missingRequirements": ["No certification evidence found"],
+                "supplierBadges": ["Manufacturer", "Customization Available"],
+                "supplierCountry": "China",
+                "supplierCity": "Shenzhen",
+                "isVerifiedSupplier": True,
+                "supportsCustomization": True,
+                "sampleAvailable": True,
+                "contacts": [{"type": "email", "value": "supplier@example.test"}],
+            }
+        )
+
+        self.assertEqual([], result.errors)
+        self.assertEqual("Negotiable", result.product.price_range)
+        self.assertEqual("10 Pieces", result.product.moq)
+        self.assertEqual(Decimal("0.86"), result.product.fit_score)
+        self.assertEqual(["Manufacturer", "Customization Available"], result.product.supplier_badges)
+        self.assertTrue(result.product.is_verified_supplier)
+
     def test_invalid_product_is_skipped_with_reason(self):
         result = validate_product_payload(
             {
@@ -84,6 +131,97 @@ class ProductValidationTest(unittest.TestCase):
         self.assertIn("title is required", result.errors)
         self.assertIn("productUrl must be a valid URL", result.errors)
         self.assertIn("contact[0]: email contact must be valid", result.errors)
+
+    def test_invalid_extended_sourcing_product_is_rejected(self):
+        result = validate_product_payload(
+            {
+                "title": "Industrial Fanless Mini PC",
+                "productUrl": "https://supplier.test/products/mini-pc",
+                "fitScore": 1.4,
+                "matchedRequirements": [{"requirement": "computer supplier"}],
+                "images": ["not-a-url"],
+                "contacts": [{"type": "email", "value": "supplier@example.test"}],
+            }
+        )
+
+        self.assertIsNone(result.product)
+        self.assertIn("fitScore must be between 0 and 1", result.errors)
+        self.assertIn("matchedRequirements[0] must include requirement and evidence", result.errors)
+        self.assertIn("images[0] must be a valid URL", result.errors)
+
+
+class SourcingOutputValidationTest(unittest.TestCase):
+    def test_sourcing_search_output_schema_accepts_ai_like_payload(self):
+        output = SourcingSearchOutputSchema.model_validate(
+            {
+                "normalizedIntent": {
+                    "rawQuery": "ПК, вычислительные компьютеры, ноутбуки",
+                    "productCategory": "computers and computing equipment",
+                    "supplierPreference": "manufacturer_first",
+                },
+                "missingFields": ["quantity"],
+                "clarifyingQuestions": ["Какой объём закупки планируется?"],
+                "commonFilters": ["Manufacturer"],
+                "productAttributes": [{"name": "Processor", "values": ["Intel", "AMD"]}],
+                "products": [
+                    {
+                        "title": "Industrial Fanless Mini PC",
+                        "productUrl": "https://supplier.test/products/mini-pc",
+                        "priceRange": "Negotiable",
+                        "moq": "10 Pieces",
+                        "fitScore": 0.8,
+                        "matchedRequirements": [
+                            {"requirement": "computer supplier", "evidence": "Title mentions Mini PC"}
+                        ],
+                        "contacts": [{"type": "email", "value": "supplier@example.test"}],
+                    }
+                ],
+                "sourcingGuidance": {"riskWarnings": ["Verify supplier identity"]},
+            }
+        )
+
+        self.assertEqual("manufacturer_first", output.normalized_intent.supplier_preference)
+        self.assertEqual(1, len(output.products))
+
+    def test_sourcing_search_output_supports_legacy_products_shape(self):
+        output = SourcingSearchOutputSchema.from_agent_payload(
+            {
+                "products": [
+                    {
+                        "title": "Legacy product",
+                        "productUrl": "https://supplier.test/products/legacy",
+                        "contacts": [{"type": "email", "value": "supplier@example.test"}],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual({}, output.normalized_intent.model_dump(exclude_none=True, by_alias=True))
+        self.assertEqual("Legacy product", output.products[0].title)
+
+    def test_product_normalizer_and_fit_evaluator_do_not_invent_claims(self):
+        candidate = ProductCandidate(
+            title="Industrial Fanless Mini PC Manufacturer",
+            product_url="https://supplier.test/products/mini-pc",
+            supplier_name="Example Technology Co., Ltd.",
+            price_text="Negotiable",
+            moq_text="10 Pieces",
+            supplier_badges=["Manufacturer", "Customization Available"],
+            source_url="https://supplier.test/search?q=mini+pc",
+            source_domain="supplier.test",
+            extraction_method="public_page",
+            confidence=0.75,
+        )
+        intent = {"supplierPreference": "manufacturer_first", "mustHave": ["mini pc"], "certifications": ["CE"]}
+
+        normalized = ProductNormalizer().normalize(candidate)
+        evaluated = ProductFitEvaluator().evaluate(intent, normalized)
+
+        self.assertEqual("Negotiable", normalized["priceRange"])
+        self.assertEqual("10 Pieces", normalized["moq"])
+        self.assertTrue(evaluated["fitScore"] > 0)
+        self.assertIn("CE", " ".join(evaluated["missingRequirements"]))
+        self.assertTrue(all(item["evidence"] for item in evaluated["matchedRequirements"]))
 
 
 class SupplierContactValidationTest(unittest.TestCase):

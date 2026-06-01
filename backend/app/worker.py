@@ -8,6 +8,7 @@ from .config import Settings
 from .connectors import build_tool_registry
 from .domain import AgentTaskStatus, AgentTaskType
 from .model_providers import LocalDemoModelProvider, OllamaModelProvider
+from .postgres_repository import SqlAlchemyRepository
 from .repositories import InMemoryRepository
 from .workers import process_contract_draft, process_product_search, process_supplier_contact
 
@@ -29,7 +30,11 @@ def run_worker_tick(
     max_tasks: int | None = None,
 ) -> int:
     processed = 0
-    for task in sorted(repo.agent_tasks.values(), key=lambda item: item.created_at):
+    if hasattr(repo, "list_queued_agent_tasks"):
+        tasks = repo.list_queued_agent_tasks(limit=max_tasks or 10)
+    else:
+        tasks = sorted(repo.agent_tasks.values(), key=lambda item: item.created_at)
+    for task in tasks:
         if task.status != AgentTaskStatus.QUEUED:
             continue
         if max_tasks is not None and processed >= max_tasks:
@@ -101,7 +106,7 @@ def build_worker_model_provider(settings: Settings):
 
 def main() -> None:
     settings = Settings.from_env()
-    repo = InMemoryRepository()
+    repo = SqlAlchemyRepository(settings.database_url)
     runtime = build_worker_runtime(settings)
     poll_interval = float(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "5"))
     max_tasks_per_tick = int(os.getenv("WORKER_MAX_TASKS_PER_TICK", "10"))

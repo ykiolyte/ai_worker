@@ -18,6 +18,8 @@ class LocalDemoModelProvider:
     def complete(self, prompt: str, tools: list[str] | None = None) -> str:
         if "Conversation rules:" in prompt and "Conversation history:" in prompt:
             raise ModelProviderError("local_demo cannot generate contextual supplier replies; use MODEL_PROVIDER=ollama")
+        if "internal AI assistant" in prompt:
+            raise ModelProviderError("local_demo cannot answer internal assistant questions; use MODEL_PROVIDER=ollama")
         return json.dumps(self.complete_json(prompt), ensure_ascii=False)
 
     def complete_json(self, prompt: str) -> dict[str, Any]:
@@ -40,9 +42,10 @@ class OllamaModelProvider:
             "model": self.model_name,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
             "options": {"temperature": 0.1},
         }
+        if not _expects_plain_text(prompt):
+            payload["format"] = "json"
         status, body = (self.http_post or self._urllib_post)(
             f"{self.base_url.rstrip('/')}/api/generate",
             payload,
@@ -101,3 +104,8 @@ def _decode_first_json_object(text: str) -> Any:
             continue
         return payload
     raise ModelProviderError("model returned invalid JSON")
+
+
+def _expects_plain_text(prompt: str) -> bool:
+    lowered = prompt.lower()
+    return "internal ai assistant" in lowered and "return only the internal assistant answer" in lowered

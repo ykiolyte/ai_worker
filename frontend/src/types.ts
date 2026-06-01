@@ -9,6 +9,14 @@ export interface SupplierMessagePreferences {
   style: SupplierMessageStyle;
 }
 
+export interface AdvancedSearchFields {
+  targetMarket?: string | null;
+  quantity?: string | null;
+  budget?: string | null;
+  certifications?: string[];
+  supplierPreference?: string | null;
+}
+
 export interface GmailSyncOptions {
   requireAiReplyApproval?: boolean;
 }
@@ -17,6 +25,24 @@ export interface SearchRequestItem {
   id: string;
   queryText: string;
   maxResults: number;
+  targetMarket?: string | null;
+  quantity?: string | null;
+  budget?: string | null;
+  certifications?: string[];
+  supplierPreference?: string | null;
+  normalizedIntent?: Record<string, unknown>;
+  missingFields?: string[];
+  clarifyingQuestions?: string[];
+  commonFilters?: string[];
+  productAttributes?: Array<{ name: string; values: string[]; summary?: string }>;
+  sourcingGuidance?: {
+      qualityIndicators?: string[];
+      negotiationTips?: string[];
+      riskWarnings?: string[];
+      crossBorderNotes?: string[];
+      relatedQueries?: string[];
+  };
+  suppliersCount?: number;
   status: SearchRequestStatus;
   createdAt: string;
   updatedAt?: string | null;
@@ -35,12 +61,25 @@ export interface ProductCard {
   title: string;
   description?: string | null;
   price?: string | null;
+  priceRange?: string | null;
   currency?: string | null;
+  moq?: string | null;
   productUrl: string;
   supplierName?: string | null;
   sourceDomain?: string | null;
+  supplierBadges?: string[];
+  supplierCountry?: string | null;
+  supplierCity?: string | null;
+  isVerifiedSupplier?: boolean;
+  isAuditedSupplier?: boolean;
+  supportsCustomization?: boolean;
+  sampleAvailable?: boolean;
+  fitScore?: string | null;
+  fitSummary?: string | null;
+  matchedRequirements?: Array<{ requirement: string; evidence: string }>;
+  missingRequirements?: string[];
   images: string[];
-  attributes: Record<string, string>;
+  attributes: Record<string, unknown>;
   contacts?: SupplierContact[];
   supplierComparison?: SupplierComparison;
   duplicateReason?: string;

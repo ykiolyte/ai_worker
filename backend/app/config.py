@@ -88,6 +88,10 @@ class Settings:
     made_in_china_base_url: str = "https://www.made-in-china.com/products-search/hot-china-products"
     made_in_china_timeout_seconds: int = 15
     made_in_china_max_results: int = 5
+    enable_made_in_china_provider: bool = False
+    made_in_china_provider_max_results: int = 20
+    made_in_china_provider_rate_limit_seconds: float = 3.0
+    search_provider_order: str = "made_in_china_public,generic_web,browser_mcp"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -165,6 +169,10 @@ class Settings:
             ),
             made_in_china_timeout_seconds=int(os.getenv("MADE_IN_CHINA_TIMEOUT_SECONDS", "15")),
             made_in_china_max_results=int(os.getenv("MADE_IN_CHINA_MAX_RESULTS", "5")),
+            enable_made_in_china_provider=_env_bool("ENABLE_MADE_IN_CHINA_PROVIDER", False),
+            made_in_china_provider_max_results=int(os.getenv("MADE_IN_CHINA_PROVIDER_MAX_RESULTS", "20")),
+            made_in_china_provider_rate_limit_seconds=float(os.getenv("MADE_IN_CHINA_PROVIDER_RATE_LIMIT_SECONDS", "3")),
+            search_provider_order=os.getenv("SEARCH_PROVIDER_ORDER", "made_in_china_public,generic_web,browser_mcp"),
         )
 
 

@@ -241,7 +241,28 @@ export function ProductDetailsPage({ productId }: Props) {
       <div className="product-detail-layout">
         <aside className="product-info-panel bubble-card">
           <p className="price-line">{formatPrice(product.price, product.currency)}</p>
+          {product.priceRange && <p className="price-line">{product.priceRange}</p>}
+          {product.moq && <p>MOQ: {product.moq}</p>}
           <p>{formatNullable(product.description, "Описание не указано")}</p>
+          {(product.supplierBadges ?? []).length > 0 && (
+            <div className="chip-row">{(product.supplierBadges ?? []).map((badge) => <span className="source-badge" key={badge}>{badge}</span>)}</div>
+          )}
+          {product.fitScore && <p className="fit-score">Fit {Math.round(Number(product.fitScore) * 100)}%</p>}
+          {product.fitSummary && <p>{product.fitSummary}</p>}
+          {(product.matchedRequirements ?? []).length > 0 && (
+            <section>
+              <h3>Matched requirements</h3>
+              {(product.matchedRequirements ?? []).map((item) => (
+                <p key={`${item.requirement}-${item.evidence}`}><strong>{item.requirement}</strong>: {item.evidence}</p>
+              ))}
+            </section>
+          )}
+          {(product.missingRequirements ?? []).length > 0 && (
+            <section>
+              <h3>Missing requirements</h3>
+              <p>{(product.missingRequirements ?? []).join(", ")}</p>
+            </section>
+          )}
           {product.supplierComparison && (
             <section className="supplier-score-panel">
               <h3>Supplier rating</h3>
@@ -263,7 +284,7 @@ export function ProductDetailsPage({ productId }: Props) {
             </section>
           )}
           {!isDemo && (
-            <a href={product.productUrl} target="_blank" rel="noreferrer">
+            <a href={product.productUrl} target="_blank" rel="noopener noreferrer">
             Источник товара
             </a>
           )}

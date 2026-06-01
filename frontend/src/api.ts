@@ -1,7 +1,9 @@
-import type { ContractDraft, GmailSyncOptions, InboundMessagePayload, InternalAssistantMessage, ProductCatalogResponse, ProductDetail, SearchRequestItem, SupplierMessagePreferences } from "./types";
+import type { AdvancedSearchFields, ContractDraft, GmailSyncOptions, InboundMessagePayload, InternalAssistantMessage, ProductCatalogResponse, ProductDetail, SearchRequestItem, SupplierMessagePreferences } from "./types";
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
-const browserApiBaseUrl = `${window.location.protocol}//${window.location.hostname}:8000/api`;
+const sameOriginApiBaseUrl = `${window.location.origin}/api`;
+const devApiBaseUrl = `${window.location.protocol}//${window.location.hostname}:8000/api`;
+const browserApiBaseUrl = window.location.port === "5173" ? devApiBaseUrl : sameOriginApiBaseUrl;
 const API_BASE_URL =
   window.location.hostname === "host.docker.internal"
     ? browserApiBaseUrl
@@ -27,10 +29,15 @@ export function getSearchRequest(searchRequestId: string) {
   return request<SearchRequestItem>(`/search-requests/${searchRequestId}`);
 }
 
-export function createSearchRequest(queryText: string, maxResults: number) {
+export function createSearchRequest(queryText: string, maxResults: number): Promise<SearchRequestItem>;
+export function createSearchRequest(queryText: string, maxResults: number, advanced: AdvancedSearchFields): Promise<SearchRequestItem>;
+export function createSearchRequest(queryText: string, maxResults: number, advanced: AdvancedSearchFields = {}) {
+  const body = Object.keys(advanced).length > 0
+    ? JSON.stringify({ queryText, maxResults, ...advanced })
+    : JSON.stringify({ queryText, maxResults });
   return request<SearchRequestItem>("/search-requests", {
     method: "POST",
-    body: JSON.stringify({ queryText, maxResults }),
+    body,
   });
 }
 

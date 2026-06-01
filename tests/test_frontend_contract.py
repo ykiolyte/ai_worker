@@ -13,7 +13,20 @@ def read(path: str) -> str:
 class FrontendContractTest(unittest.TestCase):
     def test_search_requests_page_states_and_form(self):
         text = read("pages/SearchRequestsPage.tsx")
-        for expected in ["loading", "queryText", "maxResults", "min={1}", "max={50}"]:
+        for expected in ["loading", "queryText", "maxResults", "targetMarket", "quantity", "budget", "certifications", "supplierPreference", "min={1}", "max={50}"]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
+
+    def test_sourcingai_like_search_experience_is_rendered(self):
+        text = read("pages/SearchRequestsPage.tsx")
+        for expected in [
+            "sourcing-hero",
+            "sourcing-prompt",
+            "examples",
+            "manufacturer_first",
+            "SourcingAI",
+            "ПК, вычислительные компьютеры, ноутбуки",
+        ]:
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
 
@@ -76,7 +89,7 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_request_catalog_states_and_pagination(self):
         text = read("pages/RequestCatalogPage.tsx")
-        for expected in ["loading", "page", "items", "formatPrice"]:
+        for expected in ["loading", "page", "items", "formatPrice", "missingFields", "clarifyingQuestions", "commonFilters", "productAttributes", "sourcingGuidance", "suppliersCount"]:
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
 
@@ -103,6 +116,22 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text + types)
 
+    def test_request_catalog_splits_made_in_china_results_into_own_column(self):
+        text = read("pages/RequestCatalogPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "madeInChinaItems",
+            "regularItems",
+            "catalog-source-columns",
+            "made-in-china-column",
+            "Made-in-China",
+            "sourcePlatform",
+            "inquiryUrl",
+            "moq",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text + types)
+
     def test_request_catalog_shows_supplier_comparison_rating(self):
         text = read("pages/RequestCatalogPage.tsx")
         types = read("types.ts")
@@ -122,6 +151,42 @@ class FrontendContractTest(unittest.TestCase):
         ]:
             with self.subTest(expected=expected):
                 self.assertIn(expected, text + types)
+
+    def test_request_catalog_shows_sourcing_fit_fields(self):
+        text = read("pages/RequestCatalogPage.tsx")
+        types = read("types.ts")
+        for expected in [
+            "priceRange",
+            "fitScore",
+            "fitSummary",
+            "matchedRequirements",
+            "missingRequirements",
+            "supplierBadges",
+            "Satisfies",
+            "sourcing-guidance",
+            "fit-score",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text + types)
+
+    def test_request_catalog_renders_sourcing_filter_panel(self):
+        text = read("pages/RequestCatalogPage.tsx")
+        styles = read("styles.css")
+        for expected in [
+            "sourcing-filter-panel",
+            "selectedCommonFilters",
+            "selectedAttributeFilters",
+            "priceMinimum",
+            "priceMaximum",
+            "matchesSourcingFilters",
+            "matchesCommonFilter",
+            "matchesAttributeFilter",
+            "Clear filters",
+            "Нет товаров по выбранным фильтрам",
+            "selected-filter",
+        ]:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text + styles)
 
     def test_search_request_rows_link_to_catalog(self):
         text = read("pages/SearchRequestsPage.tsx")

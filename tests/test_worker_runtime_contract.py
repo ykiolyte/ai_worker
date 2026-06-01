@@ -1,7 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from backend.app.agent import AgentRuntime, ConnectorResult, ToolRegistry
 from backend.app.domain import AgentTask, AgentTaskType, ContactAttempt, ContactType, Product, SearchRequest, SupplierContact
+from backend.app.postgres_repository import SqlAlchemyRepository
 from backend.app.repositories import InMemoryRepository
 from backend.app.worker import run_worker_loop, run_worker_tick
 
@@ -113,6 +116,30 @@ class WorkerRuntimeContractTest(unittest.TestCase):
         self.assertEqual(1, len(email.calls))
         self.assertEqual("sent", attempt.status.value)
         self.assertEqual("completed", task.status.value)
+
+    def test_worker_tick_processes_durable_queued_product_search(self):
+        with TemporaryDirectory() as directory:
+            database_url = f"sqlite:///{Path(directory) / 'worker.db'}"
+            worker_repo = SqlAlchemyRepository(database_url, create_schema=True)
+            reader_repo = SqlAlchemyRepository(database_url, create_schema=True)
+            request = SearchRequest.create("Fast Search Product", max_results=1)
+            task = AgentTask.create(
+                AgentTaskType.PRODUCT_SEARCH,
+                {"searchRequestId": str(request.id), "queryText": request.query_text, "maxResults": 1},
+            )
+            request.agent_task_id = task.id
+            worker_repo.add_search_request(request)
+            worker_repo.add_agent_task(task)
+
+            processed = run_worker_tick(worker_repo, runtime_with_browser(), max_tasks=1)
+
+            loaded_request = reader_repo.get_search_request(request.id)
+            loaded_task = reader_repo.get_agent_task(task.id)
+            self.assertEqual(1, processed)
+            self.assertEqual("completed", loaded_task.status.value)
+            self.assertEqual("completed", loaded_request.status.value)
+            products = reader_repo.list_products_for_request(request.id)
+            self.assertTrue(any(product.title == "Fast Search Product" for product in products))
 
 
 def create_supplier_contact_task():

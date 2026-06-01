@@ -514,6 +514,43 @@ textarea {
   grid-template-columns: 1fr;
 }
 
+.catalog-source-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.source-column {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.source-column > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 2px;
+}
+
+.source-column h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.source-column > header span {
+  color: var(--text-secondary);
+  font-weight: 750;
+}
+
+.made-in-china-column {
+  padding-left: 14px;
+  border-left: 1px solid var(--border-color);
+}
+
 .attachment-card {
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
@@ -566,7 +603,8 @@ textarea {
 
 .demo-badge,
 .status-badge,
-.supplier-rating {
+.supplier-rating,
+.source-badge {
   display: inline-flex;
   align-items: center;
   width: fit-content;
@@ -584,6 +622,33 @@ textarea {
 .status-badge {
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+
+.made-in-china-badge {
+  color: #064e3b;
+  background: #d1fae5;
+}
+
+.made-in-china-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.made-in-china-fields span,
+.made-in-china-fields a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  background: var(--app-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 650;
 }
 
 .supplier-rating {
@@ -721,6 +786,53 @@ textarea {
   border-color: color-mix(in srgb, var(--primary-accent) 55%, var(--border-color));
 }
 
+.sourcing-filter-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.price-filter-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.price-filter-row input {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  min-height: 36px;
+  padding: 7px 10px;
+  width: 128px;
+}
+
+.facet-row {
+  display: grid;
+  gap: 6px;
+}
+
+.facet-row p {
+  margin: 0;
+}
+
+button.source-badge {
+  cursor: pointer;
+}
+
+.source-badge.selected-filter {
+  border-color: var(--primary-accent);
+  box-shadow: 0 0 0 1px var(--primary-accent) inset;
+}
+
+.link-button {
+  background: transparent;
+  border: 0;
+  color: var(--primary-accent);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
 .progress-cell,
 .progress-panel {
   display: grid;
@@ -760,6 +872,42 @@ textarea {
   background: color-mix(in srgb, var(--warning) 15%, var(--panel-bg));
   border-left: 3px solid var(--warning);
   border-radius: 12px;
+}
+
+.sourcing-hero {
+  align-items: flex-start;
+}
+
+.sourcing-prompt {
+  grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(160px, 1fr));
+}
+
+.sourcing-prompt textarea,
+.sourcing-prompt select {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font: inherit;
+  resize: vertical;
+}
+
+.examples,
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sourcing-guidance {
+  display: grid;
+  gap: 12px;
+}
+
+.fit-score {
+  font-weight: 700;
+  color: var(--primary-accent);
 }
 
 .assistant-panel {
@@ -902,8 +1050,14 @@ textarea {
   }
 
   .product-detail-layout,
-  .inline-form {
+  .inline-form,
+  .catalog-source-columns {
     grid-template-columns: 1fr;
+  }
+
+  .made-in-china-column {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .assistant-drawer {

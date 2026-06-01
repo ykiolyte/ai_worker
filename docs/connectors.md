@@ -1,5 +1,27 @@
 # Connectors
 
+## Public Sourcing Providers
+
+The SourcingAI-like search provider layer is clean-room and public-only.
+Providers return raw `ProductCandidate` data with provenance; candidates are not
+trusted product records until `ProductNormalizer`, `ProductFitEvaluator`, and
+domain validation accept them.
+
+The Made-in-China-like provider may use only public pages visible in a normal
+browser/search flow. It must not use private or undocumented endpoints, cookies,
+tokens, signed request replay, login-only data, CAPTCHA/WAF bypass, or copied
+proprietary implementation. If a page is protected or private, the provider must
+skip it or fail safely.
+
+Supported provider-related environment variables:
+
+```env
+ENABLE_MADE_IN_CHINA_PROVIDER=false
+MADE_IN_CHINA_PROVIDER_MAX_RESULTS=20
+MADE_IN_CHINA_PROVIDER_RATE_LIMIT_SECONDS=3
+SEARCH_PROVIDER_ORDER=made_in_china_public,generic_web,browser_mcp
+```
+
 The MVP uses explicit connector interfaces so business logic does not depend on
 vendor-specific SDKs.
 

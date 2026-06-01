@@ -41,3 +41,21 @@ class SettingsEnvFileContractTest(unittest.TestCase):
         self.assertEqual("https://example.test/products-search/hot-china-products", settings.made_in_china_base_url)
         self.assertEqual(9, settings.made_in_china_timeout_seconds)
         self.assertEqual(4, settings.made_in_china_max_results)
+
+    def test_settings_loads_public_search_provider_options(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_MADE_IN_CHINA_PROVIDER": "true",
+                "MADE_IN_CHINA_PROVIDER_MAX_RESULTS": "20",
+                "MADE_IN_CHINA_PROVIDER_RATE_LIMIT_SECONDS": "3",
+                "SEARCH_PROVIDER_ORDER": "made_in_china_public,generic_web,browser_mcp",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_env()
+
+        self.assertTrue(settings.enable_made_in_china_provider)
+        self.assertEqual(20, settings.made_in_china_provider_max_results)
+        self.assertEqual(3.0, settings.made_in_china_provider_rate_limit_seconds)
+        self.assertEqual("made_in_china_public,generic_web,browser_mcp", settings.search_provider_order)

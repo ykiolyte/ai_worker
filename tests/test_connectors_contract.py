@@ -1,4 +1,11 @@
 import unittest
+from backend.app.search_providers import (
+    MadeInChinaPublicProvider,
+    ProductCandidate,
+    SearchProviderResult,
+    SearchProviderRouter,
+    extract_public_filter_context,
+)
 import json
 from datetime import timezone
 
@@ -373,6 +380,177 @@ class ConnectorContractTest(unittest.TestCase):
         self.assertEqual("Guangdong, China", product["attributes"]["supplierLocation"])
         self.assertEqual("Manufacturer/Factory", product["attributes"]["businessType"])
         self.assertEqual("made-in-china", product["attributes"]["sourcePlatform"])
+
+    def test_made_in_china_connector_translates_russian_technical_camera_query(self):
+        calls = []
+
+        def http_get(url, timeout):
+            calls.append((url, timeout))
+            return 200, """
+            <html><body>
+              <h2 class="product-name">
+                <a title="120fps USB Camera Module 2MP Global Shutter Ar0234 Board" href="//camera.en.made-in-china.com/product/camera.html">120fps USB Camera Module</a>
+              </h2>
+              <div class="price-new"><strong class="price">US$ 28.00</strong></div>
+              <div class="moq-new">10 Pieces (MOQ)</div>
+              <a class="compnay-name" title="Camera Module Factory" href="//camera.en.made-in-china.com">Camera Module Factory</a>
+            </body></html>
+            """
+
+        connector = MadeInChinaSearchConnector(http_get=http_get, timeout_seconds=11)
+
+        result = connector.research(
+            "Модуль камеры USB3.0 120 кадров в секунду с глобальным затвором MJPG, YUY2, H.264 FF 100 ° 1920x1080 2MP",
+            max_results=3,
+        )
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertIn("USB3.0_global_shutter_camera_module_120fps_1920x1080_2MP", calls[0][0])
+        self.assertEqual(1, len(result.payload["products"]))
+        self.assertEqual("120fps USB Camera Module 2MP Global Shutter Ar0234 Board", result.payload["products"][0]["title"])
+
+    def test_made_in_china_connector_enriches_missing_search_price_from_detail_page(self):
+        calls = []
+
+        def http_get(url, timeout):
+            calls.append((url, timeout))
+            if "/product/camera.html" in url:
+                return 200, """
+                <html><head>
+                  <meta property="og:title" content="120fps USB Camera Module 2MP Global Shutter Ar0234 Board" />
+                  <meta property="og:url" content="https://camera.en.made-in-china.com/product/camera.html" />
+                  <meta property="product:price:amount" content="71.00" />
+                  <meta property="product:price:currency" content="USD" />
+                </head><body>
+                  <a class="company-name" title="Camera Module Factory" href="https://camera.en.made-in-china.com/">Camera Module Factory</a>
+                </body></html>
+                """
+            return 200, """
+            <html><body>
+              <h2 class="product-name">
+                <a title="120fps USB Camera Module 2MP Global Shutter Ar0234 Board" href="//camera.en.made-in-china.com/product/camera.html">120fps USB Camera Module</a>
+              </h2>
+              <div class="moq-new">10 Pieces (MOQ)</div>
+              <a class="compnay-name" title="Camera Module Factory" href="//camera.en.made-in-china.com">Camera Module Factory</a>
+            </body></html>
+            """
+
+        connector = MadeInChinaSearchConnector(http_get=http_get, timeout_seconds=12)
+
+        result = connector.research("USB3.0 global shutter camera module 120fps 1920x1080 2MP", max_results=1)
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual(2, len(calls))
+        product = result.payload["products"][0]
+        self.assertEqual("71.00", product["price"])
+        self.assertEqual("USD", product["currency"])
+        self.assertEqual("10 Pieces (MOQ)", product["attributes"]["moq"])
+        self.assertEqual("product_detail", product["attributes"]["priceSource"])
+
+    def test_made_in_china_connector_extracts_product_detail_page(self):
+        body = """
+        <html>
+          <head>
+            <title>Fallback title</title>
+            <meta property="og:title" content="[Hot Item] Two-Axis Four-Sensor Camera, 8mm Focal Length, Uncooled Detector" />
+            <meta property="og:url" content="https://flyirtech.en.made-in-china.com/product/GAPpSMZCkdWo/China-Two-Axis-Four-Sensor-Camera-8mm-Focal-Length-Uncooled-Detector.html" />
+            <meta property="og:image" content="https://image.made-in-china.com/2f0j00camera.jpg" />
+            <meta property="product:price:amount" content="7000.0" />
+            <meta property="product:price:currency" content="USD" />
+            <meta property="og:availability" content="instock" />
+            <meta name="Description" content="Two-Axis Four-Sensor Camera details from Hebei Flyir Technology Co., Ltd" />
+          </head>
+          <body>
+            <h2>Basic Info.</h2>
+            <div class="basic-info">
+              <div class="bsc-item cf">
+                <div class="name">Model NO.</div><div class="value">FLYIR-S-120-2-F-POD</div>
+              </div>
+              <div class="bsc-item cf">
+                <div class="name">Resolution</div><div class="value">1920x1080</div>
+              </div>
+              <div class="bsc-item cf">
+                <div class="name">Focal Length</div><div class="value">8mm</div>
+              </div>
+              <div class="bsc-item cf">
+                <div class="name">Origin</div><div class="value">China</div>
+              </div>
+            </div>
+            <input id="J-linkInfo" value="https://flyirtech.en.made-in-china.com" />
+            <a class="company-name" title="Hebei Flyir Technology Co., Ltd" href="https://flyirtech.en.made-in-china.com/">Hebei Flyir Technology Co., Ltd</a>
+            <div class="contact-info">Miss qian</div>
+            <a href="https://www.made-in-china.com/sendInquiry/prod_GAPpSMZCkdWo.html">Contact Supplier</a>
+            <div class="physical-picture">
+              <img data-original="//image.made-in-china.com/226f3j00detail.webp" alt="Two-Axis Four-Sensor Camera" />
+            </div>
+            <section class="also-viewed">
+              <a href="https://other.en.made-in-china.com/product/other.html">People also viewed camera</a>
+              <strong>US$ 1</strong>
+            </section>
+          </body>
+        </html>
+        """
+        connector = MadeInChinaSearchConnector()
+
+        product = connector.parse_product_detail(body, "https://wholesaler.made-in-china.com/product/fallback.html")
+
+        self.assertEqual("Two-Axis Four-Sensor Camera, 8mm Focal Length, Uncooled Detector", product["title"])
+        self.assertEqual(
+            "https://flyirtech.en.made-in-china.com/product/GAPpSMZCkdWo/China-Two-Axis-Four-Sensor-Camera-8mm-Focal-Length-Uncooled-Detector.html",
+            product["productUrl"],
+        )
+        self.assertEqual("Hebei Flyir Technology Co., Ltd", product["supplierName"])
+        self.assertEqual("7000.0", product["price"])
+        self.assertEqual("USD", product["currency"])
+        self.assertEqual([], product["contacts"])
+        self.assertIn("https://image.made-in-china.com/2f0j00camera.jpg", product["images"])
+        self.assertIn("https://image.made-in-china.com/226f3j00detail.webp", product["images"])
+        self.assertEqual("made-in-china", product["attributes"]["sourcePlatform"])
+        self.assertEqual("product_detail", product["attributes"]["detailSource"])
+        self.assertEqual("instock", product["attributes"]["availability"])
+        self.assertEqual("https://flyirtech.en.made-in-china.com/", product["attributes"]["supplierUrl"])
+        self.assertEqual("https://www.made-in-china.com/sendInquiry/prod_GAPpSMZCkdWo.html", product["attributes"]["inquiryUrl"])
+        self.assertEqual("Miss qian", product["attributes"]["contactPerson"])
+        self.assertEqual("FLYIR-S-120-2-F-POD", product["attributes"]["modelNo"])
+        self.assertEqual("1920x1080", product["attributes"]["resolution"])
+        self.assertEqual("8mm", product["attributes"]["focalLength"])
+        self.assertIn("basicInfo", product["attributes"])
+        self.assertNotEqual("People also viewed camera", product["title"])
+
+    def test_made_in_china_connector_fetches_direct_detail_url(self):
+        calls = []
+
+        def http_get(url, timeout):
+            calls.append((url, timeout))
+            return 200, """
+            <html><head>
+              <meta property="og:title" content="Direct Detail Product" />
+              <meta property="og:url" content="https://wholesaler.made-in-china.com/product/direct.html" />
+            </head><body>
+              <a class="company-name" title="Direct Supplier" href="https://direct.en.made-in-china.com/">Direct Supplier</a>
+            </body></html>
+            """
+
+        connector = MadeInChinaSearchConnector(http_get=http_get, timeout_seconds=9)
+
+        result = connector.research("site:https://wholesaler.made-in-china.com/product/direct.html direct product")
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertEqual([("https://wholesaler.made-in-china.com/product/direct.html", 9)], calls)
+        self.assertEqual("made_in_china", result.payload["source"]["provider"])
+        self.assertEqual("product_detail", result.payload["source"]["mode"])
+        self.assertEqual("Direct Detail Product", result.payload["products"][0]["title"])
+        self.assertEqual("Direct Supplier", result.payload["products"][0]["supplierName"])
+
+    def test_made_in_china_connector_detects_captcha_for_direct_detail_url(self):
+        connector = MadeInChinaSearchConnector(
+            http_get=lambda _url, _timeout: (200, "made-in-china fcaptcha captcha.vemic.com")
+        )
+
+        result = connector.research("https://wholesaler.made-in-china.com/product/direct.html")
+
+        self.assertFalse(result.success)
+        self.assertIn("captcha", result.error_message.lower())
 
     def test_made_in_china_connector_detects_captcha(self):
         connector = MadeInChinaSearchConnector(http_get=lambda _url, _timeout: (200, "fcaptcha captcha.vemic.com"))
@@ -1560,6 +1738,108 @@ class ConnectorContractTest(unittest.TestCase):
         registry = build_tool_registry(settings)
 
         self.assertIsInstance(registry.require("made_in_china"), MadeInChinaSearchConnector)
+
+    def test_search_provider_router_falls_back_after_provider_failure(self):
+        class FailingProvider:
+            name = "failing"
+
+            def search(self, query_text, max_results):
+                return SearchProviderResult(success=False, provider=self.name, error_message="captcha or private area")
+
+        class WorkingProvider:
+            name = "generic"
+
+            def search(self, query_text, max_results):
+                return SearchProviderResult(
+                    success=True,
+                    provider=self.name,
+                    candidates=[
+                        ProductCandidate(
+                            title="Industrial Mini PC",
+                            product_url="https://supplier.test/products/mini-pc",
+                            source_domain="supplier.test",
+                        )
+                    ],
+                )
+
+        result = SearchProviderRouter([FailingProvider(), WorkingProvider()]).search("mini pc", max_results=5)
+
+        self.assertTrue(result.success)
+        self.assertEqual("generic", result.provider)
+        self.assertEqual("Industrial Mini PC", result.candidates[0].title)
+        self.assertIn("captcha or private area", result.errors[0]["error"])
+
+    def test_made_in_china_public_provider_rejects_private_or_protected_urls(self):
+        provider = MadeInChinaPublicProvider(fetch_html=lambda _url: "<html></html>")
+
+        for url in [
+            "https://www.made-in-china.com/api/private/search",
+            "https://www.made-in-china.com/login",
+            "https://www.made-in-china.com/captcha",
+        ]:
+            with self.subTest(url=url):
+                result = provider.search_url(url, max_results=5)
+                self.assertFalse(result.success)
+                self.assertIn("public pages only", result.error_message)
+
+    def test_made_in_china_public_filter_panel_is_extracted(self):
+        html = """
+        <div id="j-unified-attr-panel">
+          <div class="TopFilterRows-module_sectionTitle__nxJIb">Originals:</div>
+          <div class="TopFilterRows-module_tag__s2Zf7 TopFilterRows-module_selected__fthsx">Interface: USB 3.0</div>
+          <div class="TopFilterRows-module_sectionTitle__nxJIb">Commonly Used:</div>
+          <div class="index-module_priceFilter__bA7PX"><input placeholder="Minimum"><input placeholder="Maximum"></div>
+          <div class="TopFilterRows-module_tag__s2Zf7">Customization Available</div>
+          <div class="TopFilterRows-module_tag__s2Zf7">Sample Available</div>
+          <div class="TopFilterRows-module_tag__s2Zf7">Manufacturer First</div>
+          <div class="OthersAttrSections-module_groupSummary__h_Mik">Buyers of USB 3.0 cameras typically prioritize sensor type, resolution, and frame rate.</div>
+          <div class="OthersAttrSections-module_row__Mw8SV">
+            <span class="OthersAttrSections-module_field__CMTLb">Sensor Type:</span>
+            <div class="OthersAttrSections-module_tag__IHrU9"><span>CMOS Global Shutter</span></div>
+            <div class="OthersAttrSections-module_tag__IHrU9"><span>CCD</span></div>
+          </div>
+          <div class="OthersAttrSections-module_row__Mw8SV">
+            <span class="OthersAttrSections-module_field__CMTLb">Resolution:</span>
+            <div class="OthersAttrSections-module_tag__IHrU9"><span>5.0 MP</span></div>
+            <div class="OthersAttrSections-module_tag__IHrU9"><span>12.0 MP</span></div>
+          </div>
+        </div>
+        """
+
+        context = extract_public_filter_context(html)
+
+        self.assertIn("Interface: USB 3.0", context["commonFilters"])
+        self.assertIn("Price range", context["commonFilters"])
+        self.assertIn("Customization Available", context["commonFilters"])
+        self.assertIn("Sample Available", context["commonFilters"])
+        self.assertIn("Manufacturer First", context["commonFilters"])
+        facets = {facet["name"]: facet["values"] for facet in context["productAttributes"]}
+        self.assertEqual(["CMOS Global Shutter", "CCD"], facets["Sensor Type"])
+        self.assertEqual(["5.0 MP", "12.0 MP"], facets["Resolution"])
+        self.assertIn("sensor type", context["sourcingGuidance"]["qualityIndicators"][0])
+
+    def test_made_in_china_public_provider_returns_filter_context(self):
+        provider = MadeInChinaPublicProvider(
+            fetch_html=lambda _url: """
+            <div id="j-unified-attr-panel">
+              <div class="TopFilterRows-module_sectionTitle__nxJIb">Commonly Used:</div>
+              <div class="TopFilterRows-module_tag__s2Zf7">Sample Available</div>
+              <div class="OthersAttrSections-module_row__Mw8SV">
+                <span class="OthersAttrSections-module_field__CMTLb">Frame Rate:</span>
+                <div class="OthersAttrSections-module_tag__IHrU9"><span>60 FPS</span></div>
+              </div>
+              <a href="/product/example.html">USB Camera Verified Supplier Sample Available</a>
+            </div>
+            """
+        )
+
+        result = provider.search_url("https://www.made-in-china.com/products-search/hot-china-products/USB_Camera.html", max_results=5)
+
+        self.assertTrue(result.success)
+        self.assertIn("Sample Available", result.common_filters)
+        self.assertEqual("Frame Rate", result.product_attributes[0]["name"])
+        self.assertTrue(result.candidates[0].sample_available)
+        self.assertTrue(result.candidates[0].is_verified_supplier)
 
 
 if __name__ == "__main__":

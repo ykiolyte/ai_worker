@@ -3,13 +3,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from html import escape
+from pathlib import Path
 import threading
 import logging
+import sys
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agent import AgentRuntime, answer_internal_product_assistant, normalize_message_language, normalize_message_style
@@ -29,6 +33,7 @@ from .domain import (
     SupplierContact,
 )
 from .model_providers import LocalDemoModelProvider, OllamaModelProvider
+from .postgres_repository import SqlAlchemyRepository
 from .repositories import InMemoryRepository
 from .workers import (
     _apply_supplier_reply_analysis,
@@ -46,6 +51,11 @@ logger = logging.getLogger(__name__)
 class CreateSearchRequestPayload(BaseModel):
     queryText: str
     maxResults: int = Field(default=5, ge=1, le=50)
+    targetMarket: str | None = None
+    quantity: str | None = None
+    budget: str | None = None
+    certifications: list[str] = Field(default_factory=list)
+    supplierPreference: str | None = None
 
 
 class ContactSupplierPayload(BaseModel):
@@ -112,9 +122,15 @@ def build_runtime(settings: Settings) -> AgentRuntime:
     )
 
 
+def build_repository(settings: Settings):
+    if "pytest" in sys.modules:
+        return InMemoryRepository()
+    return SqlAlchemyRepository(settings.database_url)
+
+
 def create_app(repository: InMemoryRepository | None = None, runtime: AgentRuntime | None = None) -> FastAPI:
     settings = Settings.from_env()
-    repo = repository or InMemoryRepository()
+    repo = repository or build_repository(settings)
     app = FastAPI(title="Product Sourcing MVP", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -124,6 +140,13 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
             "http://127.0.0.1:5173",
             "http://host.docker.internal:5173",
         ],
+        allow_origin_regex=(
+            r"^http://("
+            r"10(?:\.\d{1,3}){3}|"
+            r"192\.168(?:\.\d{1,3}){2}|"
+            r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
+            r"):5173$"
+        ),
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -184,7 +207,15 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
     @app.post("/api/search-requests", status_code=status.HTTP_201_CREATED)
     def create_search_request(payload: CreateSearchRequestPayload, background_tasks: BackgroundTasks):
         try:
-            request = SearchRequest.create(payload.queryText, max_results=payload.maxResults)
+            request = SearchRequest.create(
+                payload.queryText,
+                max_results=payload.maxResults,
+                target_market=payload.targetMarket,
+                quantity=payload.quantity,
+                budget=payload.budget,
+                certifications=payload.certifications,
+                supplier_preference=payload.supplierPreference,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
@@ -194,6 +225,11 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
                 "searchRequestId": str(request.id),
                 "queryText": request.query_text,
                 "maxResults": request.max_results,
+                "targetMarket": request.target_market,
+                "quantity": request.quantity,
+                "budget": request.budget,
+                "certifications": request.certifications,
+                "supplierPreference": request.supplier_preference,
             },
         )
         request.agent_task_id = task.id
@@ -374,6 +410,7 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         assistant_messages.append(create_internal_assistant_message("assistant", answer))
         save_internal_assistant_messages(product, assistant_messages)
+        repo.add_product(product)
         return {"reply": answer, "messages": assistant_messages}
 
     @app.post("/api/products/{product_id}/contracts", status_code=status.HTTP_201_CREATED)
@@ -466,7 +503,30 @@ def create_app(repository: InMemoryRepository | None = None, runtime: AgentRunti
             app.state.runtime = build_runtime(settings)
         return app.state.runtime
 
+    mount_webui(app)
     return app
+
+
+def mount_webui(app: FastAPI) -> None:
+    dist_dir = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    index_file = dist_dir / "index.html"
+    assets_dir = dist_dir / "assets"
+    if not index_file.exists():
+        return
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="webui-assets")
+
+    @app.get("/")
+    def webui_root():
+        return FileResponse(index_file)
+
+    @app.get("/{full_path:path}")
+    def webui_spa(full_path: str):
+        if full_path.startswith("api/") or full_path == "health":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        if "." in Path(full_path).name:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+        return FileResponse(index_file)
 
 
 def select_contact(contacts: list[SupplierContact], contact_id: UUID | None, product: Product | None = None) -> SupplierContact:
@@ -529,6 +589,18 @@ def serialize_search_request(request: SearchRequest, repo: InMemoryRepository) -
         "id": str(request.id),
         "queryText": request.query_text,
         "maxResults": request.max_results,
+        "targetMarket": request.target_market,
+        "quantity": request.quantity,
+        "budget": request.budget,
+        "certifications": request.certifications,
+        "supplierPreference": request.supplier_preference,
+        "normalizedIntent": request.normalized_intent,
+        "missingFields": request.missing_fields,
+        "clarifyingQuestions": request.clarifying_questions,
+        "commonFilters": request.common_filters,
+        "productAttributes": request.product_attributes,
+        "sourcingGuidance": request.sourcing_guidance,
+        "suppliersCount": request.suppliers_count,
         "status": request.status.value,
         "agentTaskId": str(request.agent_task_id) if request.agent_task_id else None,
         "errorMessage": request.error_message,
@@ -613,9 +685,22 @@ def serialize_product_card(product: Product, repo: InMemoryRepository | None = N
         "description": product.description,
         "price": serialize_decimal(product.price),
         "currency": product.currency,
+        "priceRange": product.price_range,
+        "moq": product.moq,
         "productUrl": product.product_url,
         "supplierName": product.supplier_name,
         "sourceDomain": product.source_domain,
+        "supplierBadges": product.supplier_badges,
+        "supplierCountry": product.supplier_country,
+        "supplierCity": product.supplier_city,
+        "isVerifiedSupplier": product.is_verified_supplier,
+        "isAuditedSupplier": product.is_audited_supplier,
+        "supportsCustomization": product.supports_customization,
+        "sampleAvailable": product.sample_available,
+        "fitScore": serialize_decimal(product.fit_score),
+        "fitSummary": product.fit_summary,
+        "matchedRequirements": product.matched_requirements,
+        "missingRequirements": product.missing_requirements,
         "images": product.images,
         "attributes": product.attributes,
     }
@@ -979,8 +1064,15 @@ def search_duration_seconds(request: SearchRequest) -> int | None:
     start = request.started_at
     if start is None:
         return None
-    end = request.completed_at or datetime.now(timezone.utc)
+    start = _aware_utc(start)
+    end = _aware_utc(request.completed_at) if request.completed_at else datetime.now(timezone.utc)
     return max(0, int((end - start).total_seconds()))
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 app = create_app()

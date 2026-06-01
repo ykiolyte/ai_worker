@@ -80,9 +80,8 @@ class SmokeFlowTest(unittest.TestCase):
         status, products = request_json(self.app, "GET", f"/api/search-requests/{created['id']}/products")
 
         self.assertEqual(200, status)
-        self.assertEqual(2, products["total"])
+        self.assertEqual(1, products["total"])
         self.assertEqual("E2E UAV Flight Controller FC-100", products["items"][0]["title"])
-        self.assertEqual("Демо-карточка для презентации", products["items"][1]["title"])
 
     def test_supplier_contact_smoke_flow(self):
         self.create_and_process_search(
@@ -130,7 +129,7 @@ class SmokeFlowTest(unittest.TestCase):
         task = next(task for task in self.repo.agent_tasks.values() if task.task_type == AgentTaskType.PRODUCT_SEARCH)
 
         self.assertIsNone(product.price)
-        self.assertEqual(2, len(self.repo.products))
+        self.assertEqual(1, len(self.repo.products))
         self.assertEqual(1, task.output_payload["productsSkipped"])
 
     def test_no_active_work_after_smoke_completion(self):

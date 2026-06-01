@@ -605,6 +605,14 @@ def answer_internal_product_assistant(
     messages: list[ConversationMessage],
     question: str,
 ) -> str:
+    language_instruction = ""
+    if _has_cyrillic(question):
+        language_instruction = (
+            "The user question is in Russian. Answer in Russian. "
+            "Treat grammar mistakes or typos as harmless; for example, "
+            "`Что думаешь о этом поставщике` means `What do you think about this supplier`. "
+            "Do not ask the user to clarify wording when the supplier assessment can be answered from the card.\n"
+        )
     prompt = (
         "You are an internal AI assistant for a product sourcing operator.\n"
         "Answer only the user's internal question. Do not write a supplier email unless explicitly asked to draft one.\n"
@@ -612,6 +620,9 @@ def answer_internal_product_assistant(
         "Use the product card, supplier contacts, extracted supplier terms, and conversation history below.\n"
         "If information is missing, say what is missing and suggest the next practical question to ask the supplier.\n"
         "Keep the answer concise and actionable.\n"
+        "Answer in the same language as the user's internal question.\n"
+        "Base the answer on the supplier/product data below; do not ask the user to clarify unless the question itself is empty.\n"
+        f"{language_instruction}"
         "\n"
         f"Product title: {product.title}\n"
         f"Product URL: {product.product_url}\n"
@@ -625,13 +636,44 @@ def answer_internal_product_assistant(
         "\n"
         f"User internal question: {question}\n"
         "Return only the internal assistant answer as readable text for a non-technical user. "
-        "Do not return raw JSON."
+        "Do not return raw JSON. Do not repeat this prompt."
     )
     try:
         answer = _humanize_internal_assistant_answer(model_provider.complete(prompt))
-    except Exception:
-        answer = ""
-    return answer or _fallback_internal_assistant_answer(product, messages, question)
+    except Exception as exc:
+        raise RuntimeError(f"AI Assistant model provider failed: {exc}") from exc
+    if not answer:
+        raise RuntimeError("AI Assistant model provider returned no usable answer")
+    if _internal_answer_needs_retry(answer, question):
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "The previous model answer was invalid because it did not follow the language/task contract:\n"
+            f"{answer}\n\n"
+            "Answer again. Use only the product/supplier data above. "
+            "For a Russian supplier-assessment question, write a concise Russian assessment with risks and next questions. "
+            "Do not mention typos. Do not ask for clarification unless the user question is empty."
+        )
+        answer = _humanize_internal_assistant_answer(model_provider.complete(retry_prompt))
+        if not answer or _internal_answer_needs_retry(answer, question):
+            raise RuntimeError("AI Assistant model provider returned an answer that does not match the requested language/task")
+    return answer
+
+
+def _internal_answer_needs_retry(answer: str, question: str) -> bool:
+    if _has_cyrillic(question) and not _has_cyrillic(answer):
+        return True
+    lowered = answer.lower()
+    clarification_markers = [
+        "could you please clarify",
+        "please clarify",
+        "there might be a typo",
+        "уточните формулировку",
+    ]
+    return any(marker in lowered for marker in clarification_markers) and bool(question.strip())
+
+
+def _has_cyrillic(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", text))
 
 
 def _humanize_internal_assistant_answer(raw: Any) -> str:
@@ -642,6 +684,8 @@ def _humanize_internal_assistant_answer(raw: Any) -> str:
 
     text = _completion_text(raw).strip()
     if not text:
+        return ""
+    if _looks_like_prompt_echo(text):
         return ""
     parsed = _parse_json_like_object(text)
     if isinstance(parsed, dict):
@@ -665,6 +709,8 @@ def _parse_json_like_object(text: str) -> Any:
 
 
 def _humanize_internal_assistant_payload(payload: dict[str, Any]) -> str:
+    if _payload_is_prompt_echo(payload):
+        return ""
     labels = {
         "summary": "Кратко",
         "riskLevel": "Уровень риска",
@@ -690,6 +736,27 @@ def _humanize_internal_assistant_payload(payload: dict[str, Any]) -> str:
         label = labels.get(key, _humanize_key(key))
         sections.append(_format_internal_assistant_section(label, value))
     return "\n\n".join(section for section in sections if section).strip()
+
+
+def _payload_is_prompt_echo(payload: dict[str, Any]) -> bool:
+    meaningful_keys = {str(key).lower() for key in payload if payload.get(key) not in (None, "", [], {})}
+    if meaningful_keys <= {"queries", "query", "prompt", "prompts"}:
+        raw_values: list[Any] = []
+        for value in payload.values():
+            raw_values.extend(value if isinstance(value, list) else [value])
+        return any(_looks_like_prompt_echo(str(value)) for value in raw_values)
+    return False
+
+
+def _looks_like_prompt_echo(text: str) -> bool:
+    lowered = text.lower()
+    markers = [
+        "you are an internal ai assistant",
+        "answer only the user's internal question",
+        "user internal question:",
+        "return only the internal assistant answer",
+    ]
+    return sum(1 for marker in markers if marker in lowered) >= 2
 
 
 def _format_internal_assistant_section(label: str, value: Any) -> str:
@@ -719,6 +786,20 @@ def _contacts_for_prompt(contacts: list[Any]) -> str:
 
 def _fallback_internal_assistant_answer(product: Product, messages: list[ConversationMessage], question: str) -> str:
     latest_inbound = _latest_supplier_message_text(messages)
+    attrs = product.attributes or {}
+    supplier = product.supplier_name or "поставщик не указан"
+    price = product.price or attrs.get("madeInChinaPriceText") or "не указана"
+    moq = product.moq or attrs.get("moq") or "не указан"
+    business_type = attrs.get("businessType") or "не указан"
+    availability = attrs.get("availability") or "не указано"
+    certification = attrs.get("certification") or "не указана"
+    discovery_query = str(attrs.get("discoveryQuery") or "").strip()
+    mismatch_note = ""
+    if discovery_query and not _query_matches_product(discovery_query, product):
+        mismatch_note = (
+            f"\n\nВажно: товар выглядит нерелевантным исходному запросу `{discovery_query}`. "
+            "Перед работой с поставщиком стоит перепроверить, что карточка действительно относится к нужной категории."
+        )
     missing = []
     for label, markers in (
         ("price", ("price", "цена", "стоим")),
@@ -731,10 +812,40 @@ def _fallback_internal_assistant_answer(product: Product, messages: list[Convers
         if not any(marker in source for marker in markers):
             missing.append(label)
     if "risk" in question.lower() or "риск" in question.lower():
-        return "Known risk points: verify supplier identity, payment terms, delivery terms, and whether the contact domain matches the supplier domain before committing."
+        return (
+            f"Поставщик: {supplier}. Риск средний: есть публичная карточка и тип бизнеса `{business_type}`, "
+            f"но цена `{price}`, MOQ `{moq}`, условия оплаты и поставки нужно подтвердить напрямую. "
+            f"Наличие: {availability}. Сертификация: {certification}."
+            f"{mismatch_note}\n\n"
+            "Следующий вопрос поставщику: попросить актуальную цену, MOQ, срок производства, условия поставки, условия оплаты и подтверждающие документы/сертификаты."
+        )
     if missing:
-        return f"Missing supplier data: {', '.join(missing)}. Next step: ask the supplier for these terms before comparing the offer."
-    return "The card has enough initial supplier data to compare price, contact quality, response history, and extracted terms. Next step: compare this supplier against alternatives."
+        return (
+            f"Предварительно поставщик выглядит как кандидат для проверки, но данных недостаточно для решения. "
+            f"Из карточки: поставщик `{supplier}`, тип `{business_type}`, цена `{price}`, MOQ `{moq}`, наличие `{availability}`. "
+            f"Не хватает: {', '.join(missing)}."
+            f"{mismatch_note}\n\n"
+            "Следующий практический вопрос: запросить актуальную цену, MOQ, lead time, условия доставки/оплаты и подтверждение спецификации товара."
+        )
+    return (
+        f"По карточке поставщик `{supplier}` выглядит пригодным для первичного сравнения: есть цена/MOQ/наличие и базовые характеристики. "
+        "Следующий шаг: сравнить его с 2-3 альтернативами и подтвердить условия письменно."
+        f"{mismatch_note}"
+    )
+
+
+def _query_matches_product(query: str, product: Product) -> bool:
+    query_terms = {term.lower() for term in re.findall(r"[A-Za-zА-Яа-я0-9]+", query) if len(term) >= 4}
+    if not query_terms:
+        return True
+    attributes_without_query = {
+        key: value
+        for key, value in (product.attributes or {}).items()
+        if str(key) not in {"discoveryQuery"}
+    }
+    product_text = f"{product.title} {product.description or ''} {attributes_without_query}".lower()
+    matched = sum(1 for term in query_terms if term in product_text)
+    return matched >= max(1, min(2, len(query_terms)))
 
 
 def _parse_supplier_analysis(raw: Any) -> dict[str, str]:
